@@ -26,6 +26,7 @@ from app.core.events import (
     ToolResultEvent,
 )
 from app.services.agent.context import truncate_messages
+from app.services.agent.mock_provider import MockProvider
 from app.services.agent.pending import PendingPatchRegistry
 from app.services.agent.provider import LLMProvider, ToolCallChunk
 from app.services.agent.tools import ToolRegistry, ToolResult
@@ -62,8 +63,26 @@ class RecentToolCallTracker:
         return len(self._digests) == self.window and len(set(self._digests)) == 1
 
 
+def describe_model(provider: LLMProvider | None) -> str:
+    """返回当前底层模型的展示名，用于注入系统提示词。
+
+    模型本身无法自省自己是谁，只有把 provider 的 model 字段写进提示词，
+    它才能准确回答「你是什么模型」。
+    """
+    if provider is None:
+        return ""
+    model = getattr(provider, "model", None)
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    name = type(provider).__name__
+    if isinstance(provider, MockProvider):
+        return f"{name}（本地模拟，非真实模型）"
+    return name
+
+
 class AgentLoop:
     SYSTEM_PROMPT = """你是 DevFlow 的 AI coding agent。工作目录是一个隔离的 workspace。
+当前底层模型：{model_name}
 你可以使用以下工具：
 {tool_descriptions}
 
@@ -116,7 +135,7 @@ class AgentLoop:
 
         run_id = run_id or f"{session_id}:{uuid4().hex[:12]}"
         tracker = RecentToolCallTracker(window=3)
-        messages = self._build_messages(user_message, tools)
+        messages = self._build_messages(user_message, tools, describe_model(provider))
         steps = 0
         tokens_used = 0
 
@@ -300,7 +319,9 @@ class AgentLoop:
         )
         return patch_id, event
 
-    def _build_messages(self, user_message: str, tools: ToolRegistry) -> list[dict]:
+    def _build_messages(
+        self, user_message: str, tools: ToolRegistry, model_name: str = ""
+    ) -> list[dict]:
         descriptions = []
         for schema in tools.to_schema():
             function = schema.get("function", {})
@@ -314,7 +335,8 @@ class AgentLoop:
             {
                 "role": "system",
                 "content": self.SYSTEM_PROMPT.format(
-                    tool_descriptions="\n".join(descriptions)
+                    tool_descriptions="\n".join(descriptions),
+                    model_name=model_name.strip() or "未知",
                 ),
             }
         ]
