@@ -5,6 +5,8 @@ export interface Session {
   demo_repo: string;
   container_ready: boolean;
   created_at: string;
+  /** 本地目录会话的真实根路径；demo 会话为 null/undefined。 */
+  local_path?: string | null;
 }
 
 export interface SessionCreated extends Session {
@@ -50,6 +52,35 @@ export interface PatchDecisionResult {
   ok: true;
   patch_id: string;
   accepted: boolean;
+}
+
+/** 用户自定义模型 Provider（api_key 只返回掩码）。 */
+export interface Provider {
+  id: string;
+  name: string;
+  base_url: string;
+  model: string;
+  api_key_masked: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface LocalBrowseEntry {
+  name: string;
+  path: string;
+  type: "dir";
+}
+
+export interface LocalBrowseResponse {
+  path: string;
+  parent: string | null;
+  entries: LocalBrowseEntry[];
+}
+
+export interface ProviderTestResult {
+  ok: boolean;
+  message: string;
+  latency_ms: number;
 }
 
 export type SSEEvent =

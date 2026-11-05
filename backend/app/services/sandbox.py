@@ -39,8 +39,16 @@ class SandboxService:
     def __init__(self, root_dir: str | Path) -> None:
         self.root_dir = Path(root_dir).expanduser().resolve()
         self.root_dir.mkdir(parents=True, exist_ok=True)
+        # 用户显式选择的真实目录（local_path 会话），允许在 root 之外操作
+        self._external_workspaces: set[Path] = set()
 
     # ------------------------------------------------------------------ sessions
+
+    def allow_workspace(self, path: str | Path) -> Path:
+        """登记用户真实目录为合法 workspace（仅 local_path 会话使用）。"""
+        resolved = Path(path).expanduser().resolve()
+        self._external_workspaces.add(resolved)
+        return resolved
 
     def create_session_container(self, container_name: str, workspace_path: str | None = None) -> str:
         """创建（幂等）会话工作目录，返回 workspace 绝对路径（等价 Docker container id）。"""
@@ -86,8 +94,10 @@ class SandboxService:
         return (process.returncode if process.returncode is not None else -1), output
 
     async def stop_and_remove(self, container_id: str) -> None:
-        """清理会话 workspace（幂等）。"""
+        """清理会话 workspace（幂等）。用户真实目录永远不会被删除。"""
         workspace = self._resolve_container(container_id, must_exist=False)
+        if self._is_external_workspace(workspace):
+            return
         if workspace.exists():
             await asyncio.to_thread(shutil.rmtree, workspace, True)
 
@@ -169,9 +179,13 @@ class SandboxService:
 
     # ------------------------------------------------------------------ internal
 
+    def _is_external_workspace(self, path: Path) -> bool:
+        return any(root == path or root in path.parents for root in self._external_workspaces)
+
     def _assert_inside_root(self, path: Path) -> None:
         if path == self.root_dir or self.root_dir not in path.parents:
-            raise ValueError(f"path must stay inside the workspace root: {path}")
+            if not self._is_external_workspace(path):
+                raise ValueError(f"path must stay inside the workspace root: {path}")
 
     def _resolve_container(self, container_id: str, must_exist: bool = True) -> Path:
         if not isinstance(container_id, str) or not container_id.strip():

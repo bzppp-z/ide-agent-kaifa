@@ -4,11 +4,22 @@
 ``validate_workspace_path`` 校验后再拼接到会话 workspace 目录下。
 """
 
+import os
 import re
-from pathlib import PurePosixPath
+import sys
+from pathlib import Path, PurePosixPath
 
 # Windows 盘符路径（C:/、C:\ 已在替换反斜杠后统一为 C:/）
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+
+# 用户真实目录会话拒绝系统保护目录（含其子目录）
+_WINDOWS_PROTECTED_DIRS = (
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+    "C:\\ProgramData",
+)
+_POSIX_PROTECTED_DIRS = ("/etc", "/usr", "/bin", "/System")
 
 
 def validate_workspace_path(relative_path: str) -> str:
@@ -39,3 +50,62 @@ def validate_workspace_path(relative_path: str) -> str:
         raise ValueError(f"path must point inside the workspace: {relative_path!r}")
 
     return str(path)
+
+
+def _normalize_for_compare(path: str | Path) -> str:
+    """跨平台可比较的绝对路径（Windows 下统一分隔符并忽略大小写）。"""
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _protected_local_dirs() -> list[str]:
+    if sys.platform == "win32":
+        protected = list(_WINDOWS_PROTECTED_DIRS)
+        system_root = os.environ.get("SystemRoot")
+        if system_root:
+            protected.append(system_root)
+        return protected
+    return list(_POSIX_PROTECTED_DIRS)
+
+
+def _is_protected_local_dir(resolved: Path) -> bool:
+    target = _normalize_for_compare(resolved)
+    if sys.platform == "win32":
+        drive, tail = os.path.splitdrive(target)
+        if tail.strip("\\/") == "":  # 任意盘符根，如 C:\
+            return True
+        candidates = _protected_local_dirs()
+        separator = "\\"
+    else:
+        if target == "/":
+            return True
+        candidates = _protected_local_dirs()
+        separator = "/"
+
+    for candidate in candidates:
+        protected = _normalize_for_compare(candidate)
+        if target == protected or target.startswith(protected + separator):
+            return True
+    return False
+
+
+def validate_local_workspace_path(raw_path: str) -> str:
+    """校验用户选择的真实目录，返回 ``Path.resolve()`` 后的绝对路径。
+
+    必须是绝对路径、存在且是目录，并拒绝系统保护目录；否则抛 ValueError。
+    """
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise ValueError("local_path must not be empty")
+
+    candidate = Path(raw_path.strip()).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError(f"local_path must be an absolute path: {raw_path!r}")
+
+    resolved = candidate.resolve()
+    if not resolved.exists():
+        raise ValueError(f"local_path does not exist: {raw_path!r}")
+    if not resolved.is_dir():
+        raise ValueError(f"local_path must be a directory: {raw_path!r}")
+    if _is_protected_local_dir(resolved):
+        raise ValueError(f"local_path points to a protected system directory: {resolved}")
+
+    return str(resolved)

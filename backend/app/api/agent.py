@@ -37,8 +37,10 @@ from app.models.message import Message as MessageModel
 from app.models.tool_call import ToolCall as ToolCallModel
 from app.schemas.agent import AgentRunRequest, AgentRunResponse, PatchDecisionRequest
 from app.services.agent.loop import AgentLoop
+from app.services.agent.provider import LLMProvider
 from app.services.agent.tools import ToolRegistry
 from app.services.auth import record_usage
+from app.services.provider_registry import resolve_provider
 
 router = APIRouter(tags=["agent"])
 
@@ -75,6 +77,10 @@ async def run_agent(
     queue: asyncio.Queue = asyncio.Queue()
     loop_states: dict[str, dict] = request.app.state.loop_states
 
+    # 每次 run 开始时解析 provider：用户启用的 DB Provider 优先，
+    # 没有时回退到 app.state.provider / settings，保持既有行为。
+    provider = await resolve_provider(db, fallback=getattr(request.app.state, "provider", None))
+
     previous = loop_states.get(session_id)
     if previous is not None and previous.get("task") is not None:
         previous["task"].cancel()
@@ -88,6 +94,7 @@ async def run_agent(
             user_message=body.message,
             workspace_path=workspace_path,
             history=history,
+            provider=provider,
         ),
         name=f"devflow-agent-{session_id}",
     )
@@ -164,11 +171,12 @@ async def _drive_agent_loop(
     user_message: str,
     workspace_path: str,
     history: list[dict],
+    provider: LLMProvider | None = None,
 ) -> None:
     """后台跑 AgentLoop，把每个事件放进 queue；结束时放哨兵 None。"""
     try:
         loop = AgentLoop(
-            provider=app.state.provider,
+            provider=provider or app.state.provider,
             tools=ToolRegistry(),
             sandbox=app.state.sandbox,
             history=history,

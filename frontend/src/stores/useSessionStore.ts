@@ -4,6 +4,7 @@ import {
   createSession as createSessionRequest,
   formatError,
   getSession,
+  type CreateSessionOptions,
 } from "../lib/api";
 import { useChatStore } from "./useChatStore";
 import { useEditorStore } from "./useEditorStore";
@@ -47,10 +48,12 @@ interface SessionState {
   id: string | null;
   token: string | null;
   demoRepo: string;
+  /** 当前本地目录会话的根路径；demo 会话为 null。 */
+  localPath: string | null;
   containerStatus: ContainerStatus;
   creating: boolean;
   error: string | null;
-  createSession: (demoRepo?: string) => Promise<boolean>;
+  createSession: (options?: CreateSessionOptions) => Promise<boolean>;
   /** 用已有 id + token 恢复会话：拉历史消息 + 重建文件树。 */
   restoreSession: (id: string, token: string) => Promise<boolean>;
   /** 页面挂载入口：sessionStorage 有凭据则恢复，否则新建会话。 */
@@ -66,6 +69,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   id: null,
   token: null,
   demoRepo: "todo-app",
+  localPath: null,
   containerStatus: "yellow",
   creating: false,
   error: null,
@@ -73,19 +77,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   setDemoRepo: (repo) => set({ demoRepo: repo }),
   setContainerStatus: (status) => set({ containerStatus: status }),
 
-  createSession: async (demoRepo) => {
-    const repo = demoRepo ?? get().demoRepo;
+  createSession: async (options) => {
+    const localPath = options?.localPath?.trim() || null;
+    const repo = options?.demoRepo ?? get().demoRepo;
     set({
       id: null,
       token: null,
       demoRepo: repo,
+      localPath,
       creating: true,
       containerStatus: "yellow",
       error: null,
     });
 
     try {
-      const created = await createSessionRequest(repo);
+      const created = await createSessionRequest(
+        localPath ? { localPath } : { demoRepo: repo },
+      );
 
       useChatStore.getState().clear();
       useEditorStore.getState().reset();
@@ -95,6 +103,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         id: created.id,
         token: created.token,
         demoRepo: created.demo_repo,
+        localPath: created.local_path ?? localPath,
         creating: false,
       });
       persistSession(created.id, created.token);
@@ -119,6 +128,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       useChatStore.getState().loadHistory(detail.messages);
       set({
         demoRepo: detail.demo_repo,
+        localPath: detail.local_path ?? null,
         creating: false,
         containerStatus: detail.container_ready ? "green" : "yellow",
       });
@@ -166,6 +176,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({
       id: null,
       token: null,
+      localPath: null,
       containerStatus: "yellow",
       creating: false,
       error: null,

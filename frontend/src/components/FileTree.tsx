@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { cn } from "../lib/utils";
+import { cn, compactPath, sessionRootLabel } from "../lib/utils";
 import { useEditorStore } from "../stores/useEditorStore";
 import { useSessionStore } from "../stores/useSessionStore";
 import { useWorkspaceStore, type FileNode } from "../stores/useWorkspaceStore";
@@ -96,10 +96,14 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
 
 export function FileTree() {
   const sessionId = useSessionStore((state) => state.id);
+  const localPath = useSessionStore((state) => state.localPath);
+  const demoRepo = useSessionStore((state) => state.demoRepo);
   const nodes = useWorkspaceStore((state) => state.nodes);
   const loading = useWorkspaceStore((state) => state.loading);
   const error = useWorkspaceStore((state) => state.error);
   const loadTree = useWorkspaceStore((state) => state.loadTree);
+
+  const rootLabel = sessionRootLabel(localPath, demoRepo);
 
   return (
     <aside className="flex w-[260px] shrink-0 flex-col border-r border-surface-border bg-panel">
@@ -124,6 +128,15 @@ export function FileTree() {
           )}
         </Button>
       </header>
+
+      {sessionId ? (
+        <div
+          className="shrink-0 truncate border-b border-surface-border px-3 py-1.5 font-mono text-[10.5px] text-muted-dim"
+          title={rootLabel}
+        >
+          {compactPath(rootLabel)}
+        </div>
+      ) : null}
 
       <div className="flex-1 overflow-y-auto py-1">
         {!sessionId ? (

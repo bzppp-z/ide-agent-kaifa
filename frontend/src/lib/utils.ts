@@ -14,3 +14,30 @@ export function encodePath(path: string): string {
     .map((segment) => encodeURIComponent(segment))
     .join("/");
 }
+
+/** 是否像绝对路径（Windows 盘符、UNC 或 POSIX 根）。 */
+export function isAbsolutePath(path: string): boolean {
+  const value = path.trim();
+  if (!value) return false;
+  return /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(value) || value.startsWith("/");
+}
+
+/**
+ * 路径过长时保留头部（盘符/根）与尾部，中间用省略号收拢。
+ * 完整路径仍应作为 title 展示。
+ */
+export function compactPath(path: string, maxLength = 46): string {
+  const value = path.trim();
+  if (maxLength <= 1 || value.length <= maxLength) return value;
+  const headLength = Math.min(10, Math.floor(maxLength / 3));
+  const tailLength = maxLength - headLength - 1;
+  return `${value.slice(0, headLength)}…${value.slice(-tailLength)}`;
+}
+
+/** 文件树头部展示的会话根：本地会话给完整路径，demo 会话给仓库名。 */
+export function sessionRootLabel(
+  localPath: string | null | undefined,
+  demoRepo: string,
+): string {
+  return localPath?.trim() || `demo/${demoRepo}`;
+}

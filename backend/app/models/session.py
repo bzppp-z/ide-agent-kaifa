@@ -13,5 +13,7 @@ class Session(Base):
     demo_repo: Mapped[str]
     # 本地模式下存会话 workspace 的绝对路径；Docker 模式恢复后存 container id
     container_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 用户自己电脑上的真实目录（规范化后的绝对路径）；demo 会话为 NULL
+    local_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     last_active_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

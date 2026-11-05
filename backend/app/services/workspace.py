@@ -7,6 +7,7 @@
 import asyncio
 import logging
 from datetime import timedelta
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -46,6 +47,21 @@ class WorkspaceService:
         if self.session_factory is not None:
             async with self.session_factory() as db:
                 session_row = await db.get(SessionModel, session_id)
+
+        # 用户真实目录会话：直接复用该目录，不复制 demo、不写标记、不建子目录
+        if session_row is not None and session_row.local_path:
+            local_dir = Path(session_row.local_path)
+            if not local_dir.exists() or not local_dir.is_dir():
+                raise ValueError(f"local workspace does not exist: {session_row.local_path}")
+            local_dir = self.sandbox.allow_workspace(local_dir)
+            if self.session_factory is not None:
+                async with self.session_factory() as db:
+                    row = await db.get(SessionModel, session_id)
+                    if row is not None:
+                        row.container_id = str(local_dir)
+                        row.last_active_at = utcnow()
+                        await db.commit()
+            return str(local_dir)
 
         existing_container_id = session_row.container_id if session_row else None
         if existing_container_id:
@@ -92,6 +108,7 @@ class WorkspaceService:
                 await db.execute(
                     select(SessionModel).where(
                         SessionModel.container_id.is_not(None),
+                        SessionModel.local_path.is_(None),
                         SessionModel.last_active_at < cutoff,
                     )
                 )

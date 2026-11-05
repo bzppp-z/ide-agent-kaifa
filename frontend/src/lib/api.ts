@@ -3,7 +3,10 @@ import { SseParser } from "./sseParser";
 import type {
   FileContent,
   FileWriteResult,
+  LocalBrowseResponse,
   PatchDecisionResult,
+  Provider,
+  ProviderTestResult,
   RunCreated,
   SessionCreated,
   SessionDetail,
@@ -89,10 +92,22 @@ export function formatError(error: unknown): string {
 
 // ---------------------------------------------------------------- typed client
 
-export function createSession(demoRepo: string): Promise<SessionCreated> {
+export interface CreateSessionOptions {
+  demoRepo?: string;
+  /** 绝对路径；提供时创建本地目录会话（优先生效）。 */
+  localPath?: string;
+}
+
+export function createSession(
+  options: CreateSessionOptions = {},
+): Promise<SessionCreated> {
+  const localPath = options.localPath?.trim();
+  const body = localPath
+    ? { local_path: localPath }
+    : { demo_repo: options.demoRepo ?? "todo-app" };
   return apiFetch<SessionCreated>("/sessions", {
     method: "POST",
-    body: JSON.stringify({ demo_repo: demoRepo }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -128,6 +143,68 @@ export function writeFile(
 
 export function terminalWsUrl(sessionId: string, token: string): string {
   return wsUrl(`/terminal/ws/${sessionId}?token=${encodeURIComponent(token)}`);
+}
+
+// ---------------------------------------------------------------- local dirs
+
+export function getLocalHome(): Promise<{ path: string }> {
+  return apiFetch<{ path: string }>("/local/home");
+}
+
+export function browseLocalDirs(path: string): Promise<LocalBrowseResponse> {
+  return apiFetch<LocalBrowseResponse>(
+    `/local/browse?path=${encodeURIComponent(path)}`,
+  );
+}
+
+// ---------------------------------------------------------------- providers
+
+export function listProviders(): Promise<Provider[]> {
+  return apiFetch<Provider[]>("/providers");
+}
+
+export interface ProviderInput {
+  name: string;
+  base_url: string;
+  model: string;
+  api_key: string;
+}
+
+export function createProvider(input: ProviderInput): Promise<Provider> {
+  return apiFetch<Provider>("/providers", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateProvider(
+  id: string,
+  input: Partial<ProviderInput>,
+): Promise<Provider> {
+  return apiFetch<Provider>(`/providers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteProvider(id: string): Promise<{ ok: true; id: string }> {
+  return apiFetch<{ ok: true; id: string }>(
+    `/providers/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+}
+
+export function activateProvider(id: string): Promise<Provider> {
+  return apiFetch<Provider>(`/providers/${encodeURIComponent(id)}/activate`, {
+    method: "POST",
+  });
+}
+
+export function testProvider(id: string): Promise<ProviderTestResult> {
+  return apiFetch<ProviderTestResult>(
+    `/providers/${encodeURIComponent(id)}/test`,
+    { method: "POST" },
+  );
 }
 
 /** 登记对 patch 的接受/拒绝决议（token 由 apiFetch 从 session store 读取）。 */

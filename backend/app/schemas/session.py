@@ -9,7 +9,10 @@ from app.schemas.message import MessageResponse
 
 
 class SessionCreate(BaseModel):
-    demo_repo: str = Field(min_length=1)
+    # demo_repo 可选：指定 local_path 时忽略，默认 "todo-app"
+    demo_repo: str = Field(default="todo-app", min_length=1)
+    # 用户自己电脑上的真实目录；提供时创建本地目录会话
+    local_path: str | None = None
 
 
 class SessionResponse(BaseModel):
@@ -28,4 +31,6 @@ class SessionCreatedResponse(SessionResponse):
 class SessionDetailResponse(SessionResponse):
     """GET /sessions/{id} 的响应：附带按时间升序的历史消息。"""
 
+    # 当前会话绑定的用户真实目录；demo 会话为 None
+    local_path: str | None = None
     messages: list[MessageResponse] = Field(default_factory=list)

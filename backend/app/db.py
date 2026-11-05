@@ -8,7 +8,13 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
@@ -37,11 +43,25 @@ SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=
 
 
 async def init_db() -> None:
-    """建表（本地模式不用 Alembic，直接 create_all）。"""
+    """建表（本地模式不用 Alembic，直接 create_all）。
+
+    ``create_all`` 不会给已存在的表补新列，因此对 SQLite 做一次轻量迁移：
+    检测 ``sessions`` 缺失的列并 ``ALTER TABLE`` 补上。重复启动幂等。
+    """
     from app import models  # noqa: F401  确保所有 ORM 模型注册到 Base.metadata
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if conn.dialect.name == "sqlite":
+            await _migrate_sqlite_sessions(conn)
+
+
+async def _migrate_sqlite_sessions(conn: AsyncConnection) -> None:
+    """给旧的 sessions 表补 ``local_path`` 列（幂等）。"""
+    rows = (await conn.exec_driver_sql("PRAGMA table_info(sessions)")).fetchall()
+    columns = {row[1] for row in rows}
+    if "local_path" not in columns:
+        await conn.exec_driver_sql("ALTER TABLE sessions ADD COLUMN local_path VARCHAR")
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:

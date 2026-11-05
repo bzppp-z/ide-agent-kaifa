@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_session
+from app.core.security import validate_local_workspace_path
 from app.db import get_db_session, utcnow
 from app.models.message import Message as MessageModel
 from app.models.session import Session as SessionModel
@@ -56,14 +57,24 @@ async def create_session(
     request: Request,
     db: AsyncSession = Depends(get_db_session),
 ) -> SessionCreatedResponse:
-    get_demo_repo(body.demo_repo)  # 未知 demo repo → ValueError → 403
+    local_path: str | None = None
+    if body.local_path is not None and body.local_path.strip():
+        try:
+            local_path = validate_local_workspace_path(body.local_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        demo_repo = "local"
+    else:
+        get_demo_repo(body.demo_repo)  # 未知 demo repo → ValueError → 403
+        demo_repo = body.demo_repo
 
     session_id = str(uuid4())
     now = utcnow()
     row = SessionModel(
         id=session_id,
-        demo_repo=body.demo_repo,
+        demo_repo=demo_repo,
         container_id=None,
+        local_path=local_path,
         created_at=now,
         last_active_at=now,
     )
@@ -111,6 +122,7 @@ async def get_session(
     base = session_to_response(row)
     return SessionDetailResponse(
         **base.model_dump(),
+        local_path=row.local_path,
         messages=[
             MessageResponse(
                 id=message.id,
@@ -133,7 +145,12 @@ async def delete_session(
     ensure_session_ownership(session_id, current_session)
     row = await load_session_or_404(db, session_id)
 
-    if row.container_id:
+    if row.local_path:
+        # 用户真实目录会话：只清 DB 状态，绝不删除用户目录
+        if row.container_id is not None:
+            row.container_id = None
+            await db.commit()
+    elif row.container_id:
         await request.app.state.workspace.sandbox.stop_and_remove(row.container_id)
         row.container_id = None
         await db.commit()
