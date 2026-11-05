@@ -91,6 +91,39 @@ class SandboxService:
         if workspace.exists():
             await asyncio.to_thread(shutil.rmtree, workspace, True)
 
+    # --------------------------------------------------------------------- shell
+
+    async def open_shell(
+        self, container_id: str
+    ) -> tuple[asyncio.subprocess.Process, asyncio.StreamReader, asyncio.StreamWriter]:
+        """启动持久交互式 shell（cwd=会话 workspace），供 WebSocket 终端双向转发。
+
+        本地模式：Windows 用 ``powershell -NoProfile -NoLogo -Command -``，
+        其他平台用 ``/bin/sh -i``。stdin/stdout 为管道，stderr 合并到 stdout。
+        Docker 模式恢复后，这里改为 ``exec_shell`` + hijack 并返回同等语义的
+        (process, reader, writer) 适配对象。
+
+        子进程生命周期由调用方负责 kill，不能泄漏。
+        """
+        workspace = self._resolve_container(container_id)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *_interactive_shell_argv(),
+                cwd=str(workspace),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"failed to start interactive shell: {exc}") from exc
+
+        if process.stdin is None or process.stdout is None:  # pragma: no cover - 防御性
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            raise RuntimeError("interactive shell pipes are unavailable")
+
+        return process, process.stdout, process.stdin
+
     # --------------------------------------------------------------------- files
 
     def write_file(self, container_id: str, relative_path: str, content: str) -> None:
@@ -159,3 +192,9 @@ def _shell_argv(command: str) -> list[str]:
     if sys.platform == "win32":
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
     return ["/bin/sh", "-c", command]
+
+
+def _interactive_shell_argv() -> list[str]:
+    if sys.platform == "win32":
+        return ["powershell", "-NoProfile", "-NoLogo", "-Command", "-"]
+    return ["/bin/sh", "-i"]

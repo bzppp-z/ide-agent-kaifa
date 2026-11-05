@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     container_idle_timeout_min: int = 30
 
     # LLM
+    # mock：本地演示用，无 API key 也能跑通 SSE 全链路；deepseek：真实调用
+    llm_provider: str = "mock"
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-chat"
@@ -47,7 +49,7 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-production"
     jwt_expire_hours: int = 24
     backend_port: int = 8000
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "http://localhost:5173,http://localhost:5174"
 
     @property
     def workspace_root_path(self) -> Path:

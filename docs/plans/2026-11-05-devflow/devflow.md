@@ -103,9 +103,10 @@
 
 ### Phase 3: API Routes + SSE + WS + Persistence
 **File:** `phase-3-api-routes-and-streams.md`
-**Goal:** 所有 FastAPI 路由 + SSE 流式 agent + WebSocket 终端 + 4 表 Postgres，能用 curl 触发完整 session → run → SSE 流
+**Goal:** 所有 FastAPI 路由 + SSE 流式 agent + WebSocket 终端 + 4 表 SQLite，能用脚本触发完整 session → run → SSE 流
 **Tasks:** 5
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ### Phase 4: Frontend UI + Three-Column Layout
 **File:** `phase-4-frontend-ui.md`

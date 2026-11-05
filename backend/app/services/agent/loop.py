@@ -89,6 +89,7 @@ class AgentLoop:
         session_workspace_path: str | None = None,
         max_steps: int = MAX_STEPS_DEFAULT,
         max_tokens: int = MAX_TOKENS_DEFAULT,
+        run_id: str | None = None,
     ) -> AsyncIterator[BaseSSEEvent]:
         provider = provider or self.provider
         tools = tools or self.tools
@@ -103,7 +104,7 @@ class AgentLoop:
         if not session_workspace_path:
             raise ValueError("session_workspace_path is required")
 
-        run_id = f"{session_id}:{uuid4().hex[:12]}"
+        run_id = run_id or f"{session_id}:{uuid4().hex[:12]}"
         tracker = RecentToolCallTracker(window=3)
         messages = self._build_messages(user_message, tools)
         steps = 0
