@@ -98,7 +98,8 @@
 **File:** `phase-2-agent-kernel.md`
 **Goal:** Provider adapter + 4 工具 + loop + RecentToolCallTracker 软检测死循环，能用 Python 脚本 mock LLM 完整跑一次 loop
 **Tasks:** 4
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ### Phase 3: API Routes + SSE + WS + Persistence
 **File:** `phase-3-api-routes-and-streams.md`

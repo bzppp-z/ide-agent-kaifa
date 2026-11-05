@@ -77,6 +77,9 @@ class DoneEvent(BaseSSEEvent):
 
     type: Literal["done"] = "done"
     run_id: str | None = None
+    warning: str | None = None
+    total_tokens: int = 0
+    total_steps: int = 0
 
 
 SSEEvent = Annotated[

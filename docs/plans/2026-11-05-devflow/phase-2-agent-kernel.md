@@ -1,10 +1,12 @@
 # Phase 2: Agent Kernel
 
 **Goal:** Agent 内核跑起来。Provider adapter + 4 个工具 + agent loop + RecentToolCallTracker 软检测死循环。能用 Python 脚本 mock 一次完整 agent loop（不依赖真实 LLM API 也不依赖前端），看到 tool.call → tool.result → done 的完整 SSE 事件输出。
-**Prerequisites:** Phase 1 全部完成——ContainerService、WorkspaceService、Postgres 4 表、FastAPI lifespan 都跑通。
+**Prerequisites:** Phase 1 全部完成——`SandboxService`、`WorkspaceService`、SQLite 4 表、FastAPI lifespan 都跑通。
 **Deliverables:** 能独立运行的 agent loop 模块（CLI 或 pytest 脚本能触发）、4 个工具全量可用、软检测死循环生效。
 
 **Interface Decisions Implemented:** 无界面改动。
+
+> **本地模式调整：** 沙箱是本地子进程（Windows PowerShell），不能假定 `ls` / `rg` 存在。工具层**必须使用 `SandboxService` 的抽象方法**（`list_files` / `read_file` / `write_file`），搜索用 Python 遍历实现（不依赖 `rg`），这样 Docker 恢复后工具层零改动。命令执行类工具（如后续终端）才走 `exec`。
 
 ---
 
@@ -17,7 +19,7 @@
 - Create: `backend/tests/test_provider.py`
 
 **Steps:**
-- [ ] 定义抽象接口：
+- [x] 定义抽象接口：
   ```python
   from abc import ABC, abstractmethod
   from collections.abc import AsyncIterator
@@ -37,8 +39,8 @@
           temperature: float = 0.3,
       ) -> AsyncIterator[ChatCompletionChunk]: ...
   ```
-- [ ] 写 DeepSeek 实现（httpx 异步流式）：调 `POST https://api.deepseek.com/v1/chat/completions`，`stream=true`，逐行解析 SSE 格式 `data: {...}`，映射为 `ChatCompletionChunk`。
-- [ ] 实现 Provider 层重试（指数退避 1s/2s/4s × 3 次）：
+- [x] 写 DeepSeek 实现（httpx 异步流式）：调 `POST https://api.deepseek.com/v1/chat/completions`，`stream=true`，逐行解析 SSE 格式 `data: {...}`，映射为 `ChatCompletionChunk`。
+- [x] 实现 Provider 层重试（指数退避 1s/2s/4s × 3 次）：
   ```python
   async def _with_retry(self, coro_factory, max_retries=3):
       for attempt in range(max_retries):
@@ -50,7 +52,7 @@
               await asyncio.sleep(2 ** attempt)
       raise
   ```
-- [ ] 写 `test_provider.py`：mock httpx.AsyncClient.stream，返回固定 SSE 数据，验证 `ChatCompletionChunk` 解析正确。
+- [x] 写 `test_provider.py`：mock httpx.AsyncClient.stream，返回固定 SSE 数据，验证 `ChatCompletionChunk` 解析正确。
 
 **Security/Boundary Notes:** API key 只从 `core.config.settings.DEEPSEEK_API_KEY` 读取，**绝不出现在日志、测试代码、Postgres**。
 
@@ -65,7 +67,7 @@
 - Create: `backend/tests/test_tools.py`
 
 **Steps:**
-- [ ] 定义工具 schema（Pydantic + 函数签名 + tool description）：
+- [x] 定义工具 schema（Pydantic + 函数签名 + tool description）：
   ```python
   # 每个工具 = (function, json_schema_for_llm_prompt)
   TOOLS = [
@@ -80,21 +82,21 @@
       {"name": "write_patch", ...},
   ]
   ```
-- [ ] 实现 `list`：`validate_workspace_path` → `container.exec("ls -la <normalized_path>")` → 解析输出 → 返回。
-- [ ] 实现 `read`：`validate_workspace_path` → `container.exec("cat <path> | head -n 2000")` → 截断后返回。
-- [ ] 实现 `search`：`validate_workspace_path` → `container.exec("cd /workspace && rg -n '<query>' <path> | head -n 100")` → 返回匹配行。
-- [ ] 实现 `write_patch`：
+- [x] 实现 `list`：`validate_workspace_path` → `sandbox.list_files(container_id, normalized_path)` → 格式化返回（`"empty"` 用空字符串表示根目录）。
+- [x] 实现 `read`：`validate_workspace_path` → `sandbox.read_file(container_id, path)` → 超过 2000 行截断并标注 `[truncated]`。
+- [x] 实现 `search`：`validate_workspace_path` → 用 `sandbox.list_files` 递归遍历（限制深度 ≤ 4、文件 ≤ 200 个、单文件 ≤ 1MB）→ Python 逐行匹配 `query`（正则失败时退回字面量匹配）→ 返回 `path:line: content`，最多 100 条。
+- [x] 实现 `write_patch`：
   ```python
   # 1. validate_workspace_path(path)
-  # 2. container.exec("cat <path>") 拿到当前文件内容
+  # 2. sandbox.read_file(container_id, path) 拿到当前文件内容
   # 3. Python 本地做一次 search/replace，记录 old 出现次数
   #    - 如果 search 出现 0 次 → ToolResult(ok=False, summary="pattern not found")
   #    - 如果出现 >1 次 → ToolResult(ok=False, summary="ambiguous match") — 强制精确替换
-  # 4. 如果替换成功 → container.exec 用 heredoc 写回去
+  # 4. 替换成功 → sandbox.write_file 写回去，并返回 before/after 内容供 diff
   # 5. 返回 ToolResult(ok=True, summary=f"patched {path}")
   ```
-  **这里不做 diff 生成**——diff 由 agent loop 在 write_patch 成功后从容器 exec cat 读回来做对比（Phase 3 的 SSE patch.proposed 事件里生成）。
-- [ ] 写 `test_tools.py`：mock ContainerService.exec 返回固定内容，验证 4 个工具的路径校验和返回结构。
+  **这里不做 diff 渲染**——diff 由 agent loop 在 write_patch 成功后从 before/after 生成（Phase 3 的 SSE patch.proposed 事件里输出）。
+- [x] 写 `test_tools.py`：用真实 `SandboxService`（临时 workspace）+ 预置文件，验证 4 个工具的行为、路径校验和返回结构。
 
 **Security/Boundary Notes:**
 - 所有工具入参 **强制先过** `validate_workspace_path`，**绝不用 try/except 吞掉异常**
@@ -113,7 +115,7 @@
 - Create: `backend/tests/test_loop.py`（mock LLM，验证循环）
 
 **Steps:**
-- [ ] 写 AgentLoop 类：
+- [x] 写 AgentLoop 类：
   ```python
   class AgentLoop:
       SYSTEM_PROMPT = """
@@ -132,7 +134,7 @@
           user_message: str,
           provider: LLMProvider,
           tools: ToolRegistry,
-          container: ContainerService,
+          sandbox: SandboxService,
           session_workspace_path: str,
           max_steps: int = 25,
           max_tokens: int = 200000,
@@ -162,7 +164,7 @@
                       yield SSEEvent("tool.call", {"tool": tc.name, "input": tc.args})
                       # 执行
                       start = time.time()
-                      result = await tools.call(tc.name, tc.args, container, session_workspace_path)
+                      result = await tools.call(tc.name, tc.args, sandbox, session_workspace_path)
                       duration_ms = int((time.time() - start) * 1000)
                       # 软检测：同一工具 + 同一入参 hash 连续 tracker.window 次
                       call_hash = tracker.record(tc.name, tc.args)
@@ -182,8 +184,8 @@
           reason = "max_steps" if steps >= max_steps else "max_tokens"
           yield SSEEvent("done", {"totalTokens": tokens_used, "totalSteps": steps, "warning": f"stopped: {reason}"})
   ```
-- [ ] 写 `RecentToolCallTracker`：窗口 3 个 `(tool_name, json.dumps(args, sort_keys=True))` 的 hash。`record` → 入队；`is_stuck` → 窗口内所有 hash 相同则 True。
-- [ ] 写 `context.py`（简化版）：当 `messages` 总 token 数估算接近上限时，**只截断早期的 tool.result 消息**（保留 system prompt 和最近 N 轮），不截断用户消息和 assistant 消息。MVP 阶段不做真正的压缩重写，简单截断。
+- [x] 写 `RecentToolCallTracker`：窗口 3 个 `(tool_name, json.dumps(args, sort_keys=True))` 的 hash。`record` → 入队；`is_stuck` → 窗口内所有 hash 相同则 True。
+- [x] 写 `context.py`（简化版）：当 `messages` 总 token 数估算接近上限时，**只截断早期的 tool.result 消息**（保留 system prompt 和最近 N 轮），不截断用户消息和 assistant 消息。MVP 阶段不做真正的压缩重写，简单截断。
 
 **Security/Boundary Notes:**
 - `max_steps=25` 和 `max_tokens=200000` 是**硬限制**，loop 必须强制 break，**不能**依赖 LLM 自己说 stop
@@ -193,7 +195,7 @@
 
 ## Task 2.4: services/auth.py — JWT + 用量记录 + 单元测试 + 完整 mock loop 验证
 
-**Goal:** 实现 JWT 签发/校验 + 每 run 写 usage 到 Postgres。然后写一个 `scripts/mock_loop_demo.py`，能用 mock LLM + mock Container 完整跑一次 agent loop 并打印 SSE 事件。
+**Goal:** 实现 JWT 签发/校验 + 每 run 写 usage 到 SQLite。然后写一个 `scripts/mock_loop_demo.py`，能用 mock LLM + 真实临时 Sandbox 完整跑一次 agent loop 并打印 SSE 事件。
 
 **Files:**
 - Create: `backend/app/services/auth.py`
@@ -201,7 +203,7 @@
 - Create: `backend/scripts/mock_loop_demo.py`
 
 **Steps:**
-- [ ] 写 `auth.py`：
+- [x] 写 `auth.py`：
   ```python
   from jose import jwt, JWTError
   from passlib.context import CryptContext
@@ -222,19 +224,19 @@
       db_session.add(usage)
       await db_session.commit()
   ```
-- [ ] 写 `test_auth.py`：create → verify → 过期 → tamper 4 种 case。
-- [ ] 写 `scripts/mock_loop_demo.py`（**这是 phase 2 的核心交付验证**）：
+- [x] 写 `test_auth.py`：create → verify → 过期 → tamper 4 种 case。
+- [x] 写 `scripts/mock_loop_demo.py`（**这是 phase 2 的核心交付验证**）：
   ```python
-  # 不连真实 Postgres、不连真实 Docker、不连真实 LLM
+  # 不连真实 LLM、不用 Docker；用临时目录 + 真实 SandboxService
   # Mock LLM 依次返回：
   #   chunk 1: tool_call list(path="src") + finish_reason=tool_calls
   #   chunk 2: tool_call search(query="router", path="src/") + finish_reason=tool_calls
   #   chunk 3: finish_reason=stop, content="好的，src/ 里有 3 个文件..."
-  # Mock Container.exec 返回固定内容
+  # 临时 workspace 预置 src/ 下 3 个文件（其中一个含 router 关键字）
 
   async def main():
-      loop = AgentLoop(provider=MockProvider(), tools=ToolRegistry(), container=MockContainer())
-      async for event in loop.run_stream(mock_session_id, "帮我看看 src 目录"):
+      loop = AgentLoop(provider=MockProvider(), tools=ToolRegistry(), sandbox=SandboxService(tmp_dir))
+      async for event in loop.run_stream(mock_session_id, "帮我看看 src 目录", workspace_path):
           print(event)
 
   # 预期输出：
@@ -245,7 +247,7 @@
   # SSEEvent("message.delta", {"content": "好的..."})
   # SSEEvent("done", {"totalTokens": 450, "totalSteps": 2})
   ```
-- [ ] 运行 mock demo 脚本：
+- [x] 运行 mock demo 脚本：
   ```
   C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe backend/scripts/mock_loop_demo.py
   ```
@@ -255,13 +257,13 @@
 
 ## Phase Completion Checklist
 
-- [ ] LLMProvider 抽象接口定义完成，DeepSeek 实现的 `chat_completion_stream` 能流式返回 chunks
-- [ ] Provider 层重试（指数退避 × 3）实现
-- [ ] 4 个工具（list/read/search/write_patch）全部实现，每个入参先过 `validate_workspace_path`
-- [ ] `write_patch` 能检测 ambiguous match（>1 个匹配时拒绝执行）
-- [ ] AgentLoop 主循环实现，max_steps / max_tokens 硬限制生效
-- [ ] RecentToolCallTracker 软检测死循环（连续 3 次相同 hash → 注入提示词）
-- [ ] JWT 创建/校验通过单测
-- [ ] mock_loop_demo.py 输出完整事件流（tool.call → tool.result → ... → done）
-- [ ] pytest `tests/` 下所有新测试 pass
-- [ ] 下一 phase 可以直接把 loop 接到 FastAPI SSE 端点上
+- [x] LLMProvider 抽象接口定义完成，DeepSeek 实现的 `chat_completion_stream` 能流式返回 chunks
+- [x] Provider 层重试（指数退避 × 3）实现
+- [x] 4 个工具（list/read/search/write_patch）全部实现，每个入参先过 `validate_workspace_path`
+- [x] `write_patch` 能检测 ambiguous match（>1 个匹配时拒绝执行）
+- [x] AgentLoop 主循环实现，max_steps / max_tokens 硬限制生效
+- [x] RecentToolCallTracker 软检测死循环（连续 3 次相同 hash → 注入提示词）
+- [x] JWT 创建/校验通过单测
+- [x] mock_loop_demo.py 输出完整事件流（tool.call → tool.result → ... → done）
+- [x] pytest `tests/` 下所有新测试 pass
+- [x] 下一 phase 可以直接把 loop 接到 FastAPI SSE 端点上
