@@ -3,7 +3,13 @@
 本文档对应 Phase 5 验收：Diff 审批、F5 刷新恢复、idle 回收。
 默认 **本地模式**（SQLite + 本地 workspace + MockProvider），无需 Docker / Postgres / API key。
 
-## 1. 启动（两个终端）
+## 1. 启动
+
+**一键启动（推荐）**：双击项目根目录的 `start-devflow.bat`，等待出现 Backend ready / Frontend ready 后浏览器会自动打开。
+停止：双击 `stop-devflow.bat`（会释放 8000 / 5173 端口）。
+进程日志：`%LOCALAPPDATA%\DevFlow\logs`。
+
+**手动启动（两个终端）**：
 
 终端 A（后端，端口 8000）：
 
