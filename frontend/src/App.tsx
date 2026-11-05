@@ -10,18 +10,18 @@ import { useSessionStore } from "./stores/useSessionStore";
 
 export default function App() {
   const sessionId = useSessionStore((state) => state.id);
-  const createSession = useSessionStore((state) => state.createSession);
+  const bootstrap = useSessionStore((state) => state.bootstrap);
 
-  const createRef = useRef(createSession);
-  createRef.current = createSession;
+  const bootstrapRef = useRef(bootstrap);
+  bootstrapRef.current = bootstrap;
   const bootstrapped = useRef(false);
 
-  // 首次进入自动建会话；后续由顶栏「新会话」/repo 切换触发
+  // 首次进入：有 sessionStorage 凭据则恢复会话（含历史消息），否则新建。
   useEffect(() => {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
     if (!useSessionStore.getState().id) {
-      void createRef.current();
+      void bootstrapRef.current();
     }
   }, []);
 
@@ -32,7 +32,7 @@ export default function App() {
     if (state.id) {
       void state.refreshSandbox();
     } else {
-      void createRef.current();
+      void bootstrapRef.current();
     }
   };
 

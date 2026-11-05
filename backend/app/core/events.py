@@ -54,6 +54,9 @@ class PatchProposedEvent(BaseSSEEvent):
     path: str
     search: str
     replace: str
+    before: str = ""
+    after: str = ""
+    diff: str = ""
 
 
 class RunOutputEvent(BaseSSEEvent):

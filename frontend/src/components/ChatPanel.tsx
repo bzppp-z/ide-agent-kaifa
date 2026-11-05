@@ -1,34 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 
-import type { ChatItem, ChatPatchItem } from "../stores/useChatStore";
+import type { ChatItem } from "../stores/useChatStore";
 import { useChatStore } from "../stores/useChatStore";
 import { useSessionStore } from "../stores/useSessionStore";
+import { PatchDiff } from "./PatchDiff";
 import { SseMessage } from "./SseMessage";
 import { ToolCard } from "./ToolCard";
 import { Button } from "./ui/button";
 import { SendIcon } from "./ui/icons";
-
-function PatchCard({ item }: { item: ChatPatchItem }) {
-  return (
-    <div className="rounded border border-surface-border border-l-2 border-l-[#3A4148] bg-surface-alt px-2.5 py-1.5">
-      <div className="text-[11px] text-muted">
-        建议修改{" "}
-        <span className="font-mono text-[11.5px] text-text">{item.path}</span>
-      </div>
-      <details className="mt-1">
-        <summary className="cursor-pointer list-none text-[10.5px] text-muted-dim transition-colors hover:text-text">
-          查看片段
-        </summary>
-        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-bg px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-muted">
-          <span className="text-red-400/80">{"- " + item.search}</span>
-          {"\n"}
-          <span className="text-brand">{"+ " + item.replace}</span>
-        </pre>
-      </details>
-    </div>
-  );
-}
 
 function ChatEventView({
   item,
@@ -63,7 +43,7 @@ function ChatEventView({
       return <ToolCard item={item} />;
 
     case "patch":
-      return <PatchCard item={item} />;
+      return <PatchDiff item={item} />;
 
     case "output":
       return (

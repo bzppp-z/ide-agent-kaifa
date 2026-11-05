@@ -46,6 +46,12 @@ export interface FileWriteResult {
   path: string;
 }
 
+export interface PatchDecisionResult {
+  ok: true;
+  patch_id: string;
+  accepted: boolean;
+}
+
 export type SSEEvent =
   | { type: "message.delta"; content: string }
   | {
@@ -68,6 +74,9 @@ export type SSEEvent =
       path: string;
       search: string;
       replace: string;
+      before?: string;
+      after?: string;
+      diff?: string;
     }
   | { type: "run.output"; stream: "stdout" | "stderr"; chunk: string }
   | { type: "error"; message: string; code?: string | null }

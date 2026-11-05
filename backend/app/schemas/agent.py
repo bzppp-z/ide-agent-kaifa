@@ -9,3 +9,9 @@ class AgentRunRequest(BaseModel):
 
 class AgentRunResponse(BaseModel):
     run_id: str
+
+
+class PatchDecisionRequest(BaseModel):
+    """用户对待审批 patch 的决议。"""
+
+    accepted: bool

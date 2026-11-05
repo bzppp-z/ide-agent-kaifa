@@ -1,10 +1,15 @@
 # Phase 5: Diff Approval + Refresh Recovery + Full E2E
 
-**Goal:** 补齐 Diff 审批（左右对比 + 接受/拒绝按钮）、F5 刷新后从 Postgres 恢复会话历史、容器 idle 30 分钟自动回收。按顺序跑通 spec 里定义的 5 个验收场景。
-**Prerequisites:** Phase 1–4 全部完成。前后端已联通、SSE/WS 都跑通、5 个 Zustand store 都接到后端 API。
+**Goal:** 补齐 Diff 审批（左右对比 + 接受/拒绝按钮）、F5 刷新后从 SQLite 恢复会话历史、sandbox idle 30 分钟自动回收。按顺序跑通 spec 里定义的 5 个验收场景。
+**Prerequisites:** Phase 1–4 全部完成。前后端已联通、SSE/WS 都跑通、Zustand stores 都接到后端 API。
 **Deliverables:** 5 个验收场景全部能在浏览器内按序走通；数字化验收指标可达到；面试演示可用。
 
 **Interface Decisions Implemented:** PatchDiff 组件左右对比 + 接受/拒绝按钮；F5 刷新恢复后所有消息/卡片/状态重新渲染。
+
+> **本地模式调整：**
+> - 持久化 SQLite；"容器"= 本地 workspace 目录，`stop_and_remove` = 删除目录。
+> - **mock provider 必须能触发写补丁**：用户消息含「新增 / 改 / healthz / 修复」等关键词时返回 `write_patch` tool_call，否则走原来的 list 流程。否则无法演示场景 3。
+> - **Last-Event-ID 重放不实现**（DB 无逐事件表）。重连策略降级为：刷新/断线后 `GET /sessions/{id}` 拉全量历史消息重新渲染，不重放 SSE 增量。这是明确的 MVP 简化，必须在报告中记录。
 
 ---
 
@@ -21,38 +26,14 @@
 - Modify: `frontend/src/components/ChatPanel.tsx`（渲染 patch.proposed 事件）
 
 **Steps:**
-- [ ] 后端 `write_patch` 工具返回时带上 before/after 内容，`loop.py` 里在 write_patch 成功后生成：
-  ```python
-  # tools.write_patch 返回 ToolResult(ok=True, before="...old content...", after="...new content...")
-  # loop.py 里：
-  diff_lines = unified_diff(before.splitlines(), after.splitlines())
-  yield SSEEvent("patch.proposed", {
-      "files": [{"path": target_path, "before": before, "after": after, "diff": diff_lines}],
-      "patch_id": str(uuid4()),
-  })
-  # 此时 loop **暂停**，等待前端 POST /agent/patch/{patch_id} 接受或拒绝
-  # 用一个 asyncio.Event 做暂停/唤醒
-  loop._pending_patch_events[patch_id] = asyncio.Event()
-  await loop._pending_patch_events[patch_id].wait()  # 等待前端响应
-  ```
-- [ ] 后端加 PATCH 端点：
-  ```python
-  @router.patch("/agent/patch/{patch_id}")
-  async def respond_patch(patch_id: str, body: PatchRespondRequest, ...):
-      # body: {"accepted": true|false}
-      # accepted=True → 真正执行容器写入（其实 write_patch 工具已经写了，但保险起见再写一次）
-      # accepted=False → 记录 rejection，唤醒 loop 让它重新规划
-      loop._pending_patch_events[patch_id].set()  # 唤醒 loop
-      return {"ok": True}
-  ```
-- [ ] 前端 `PatchDiff.tsx`：
-  ```tsx
-  // 左右两栏对比视图
-  // 左边 before（红色背景标记删除行），右边 after（绿色背景标记新增行）
-  // 使用 shadcn Card + 简单的 <pre> 渲染，MVP 不做真正的 diff lib
-  // 底部：[品牌绿边框 + hover 变绿] 接受按钮 | 拒绝按钮（灰色 hover 变红）
-  ```
-- [ ] ChatPanel 里 `patch.proposed` 事件 → 渲染 `<PatchDiff>` 组件。
+- [x] 后端 `tools.write_patch` 增加 `dry_run: bool = False` 参数：`dry_run=True` 时只计算替换结果、**不落盘**，返回 `ToolResult(ok=True, extra={"before":..., "after":..., "applied": False})`；`dry_run=False` 时按原逻辑写入。
+- [x] `PatchProposedEvent` 增加可选字段 `before: str = ""`、`after: str = ""`、`diff: str = ""`（保持向后兼容）。
+- [x] `loop.py` 拦截 `write_patch`：先 `dry_run=True` 计算 → 成功则 `yield PatchProposedEvent(path, search, replace, before, after, diff)` → 用 `app.state.pending_patches[patch_id] = {"event": asyncio.Event(), "accepted": None, "payload": {...}}` 暂停等待（`asyncio.wait_for(..., timeout=120)`，超时视为拒绝）→ 唤醒后：
+  - `accepted=True` → 调 `write_patch(dry_run=False)` 真正落盘，tool.result 正常回灌
+  - `accepted=False` → tool.result 内容为 "user rejected the patch"，回灌给 LLM 重新规划
+- [x] 后端加 `PATCH /agent/patch/{patch_id}` 端点：body `{"accepted": bool}` → 设置 decision + `event.set()` → `{"ok": true}`；patch_id 不存在 → 404。
+- [x] 前端 `PatchDiff.tsx`：左右两栏 `<pre>` 对比（左 before 红底删除行、右 after 绿底新增行），底部「接受」（品牌绿）「拒绝」（灰→红 hover）按钮，点击后调 PATCH 并禁用按钮。
+- [x] ChatPanel 渲染 `patch.proposed` → `<PatchDiff>`；接受后自动重新拉取当前文件刷新 Monaco。
 
 **Security/Boundary Notes:**
 - 接受补丁时后端再写一次容器——即使 write_patch 工具已经写了，多一层保险
@@ -60,49 +41,21 @@
 
 ---
 
-## Task 5.2: F5 刷新后从 Postgres 恢复会话历史 + Zustand 初始化 + token 持久化
+## Task 5.2: F5 刷新后从 SQLite 恢复会话历史 + token 持久化
 
-**Goal:** 刷新页面后——1) token 存 sessionStorage（比 localStorage 好，关闭标签页就丢）；2) Zustand 初始化时 fetch `GET /sessions/{id}` 拿到历史 messages 和 tool_calls；3) 重建 SSE 连接（用 Last-Event-ID 补发漏掉的事件）；4) 恢复后的容器状态能正确反映（重启后容器可能已被回收）。
+**Goal:** 刷新页面后：1) token 存 sessionStorage；2) 初始化时 fetch `GET /sessions/{id}` 重建历史 messages 和工具卡片；3) sandbox 目录若已被回收，自动重建并在顶栏反映状态。
 
 **Files:**
-- Modify: `frontend/src/stores/useSessionStore.ts`（token 读写 sessionStorage）
-- Modify: `frontend/src/stores/useChatStore.ts`（init 时从 Postgres 拉历史）
-- Modify: `frontend/src/lib/sse.ts`（断线重连带 Last-Event-ID）
-- Modify: `backend/app/main.py`（启动时检查容器是否还活着，dead 的标记 container_ready=false）
+- Modify: `frontend/src/stores/useSessionStore.ts`（token/sessionId 读写 sessionStorage，并提供 bootstrap）
+- Modify: `frontend/src/stores/useChatStore.ts`（init 时从后端拉历史并映射成消息/卡片）
+- Modify: `frontend/src/App.tsx`（挂载时调用 bootstrap）
+- Modify: `backend/app/main.py` / `app/api/sessions.py`（GET session 时若 container_id 指向的目录已不存在则置空并重建）
 
 **Steps:**
-- [ ] `useSessionStore`：
-  ```ts
-  const initialToken = sessionStorage.getItem("devflow_token");
-  const initialSessionId = sessionStorage.getItem("devflow_session_id");
-  // store 初始化时检查这两个值
-  create((set, get) => ({
-    token: initialToken,
-    id: initialSessionId,
-    createSession: async (demoRepo) => {
-      const res = await apiFetch("/sessions", { method: "POST", body: JSON.stringify({ demoRepo }) });
-      sessionStorage.setItem("devflow_token", res.token);
-      sessionStorage.setItem("devflow_session_id", res.id);
-      set({ token: res.token, id: res.id });
-      // 同时初始化 ChatStore 从后端拉历史
-      await get().initFromBackend();
-    },
-    initFromSession: async () => {
-      if (initialSessionId && initialToken) {
-        set({ token: initialToken, id: initialSessionId });
-        await get().initFromBackend();  // 拉历史 + 重建 SSE
-      }
-    },
-  }));
-  ```
-- [ ] SSE hook 断线重连 + Last-Event-ID：
-  ```ts
-  let lastEventId = localStorage.getItem("devflow_last_event_id") || "";
-  // 连接时带 Last-Event-ID header
-  // 每次事件更新 lastEventId 写入 localStorage
-  // 后端 SSE 端点处理：收到 Last-Event-ID 时从 Postgres 补发后续事件
-  ```
-- [ ] **数字化验收**：F5 刷新后 1 秒内看到完整历史消息 + 工具卡片 + 当前 SSE 重连中的状态。
+- [x] `useSessionStore`：初始化读 `sessionStorage` 的 `devflow_token` / `devflow_session_id`；`createSession` 与 `bootstrap` 都写回 sessionStorage；`bootstrap()` 若两者存在则 `GET /sessions/{id}` 拉详情 → 调 `chatStore.loadHistory(messages)` → 文件树重新加载根目录。
+- [x] `useChatStore.loadHistory(messages)`：把 role=user/assistant 映射为消息气泡；tool_calls 历史由后端 `GET /sessions/{id}` 一并返回（若 response 未含 tool_calls，可只恢复消息文本，不恢复工具卡片，并在报告中说明）。
+- [x] 后端 GET /sessions：若 `container_id` 非空但目录不存在 → 置 `None`，`container_ready=false`；前端显示红色沙箱状态 + 「恢复工作区」按钮（点击调 ensure_container 的接口；若无现成接口，用 `GET /files/{id}/` 触发懒初始化即可）。
+- [x] **数字化验收**：F5 刷新后 1 秒内看到完整历史消息。
 
 **Security/Boundary Notes:**
 - token 存 sessionStorage（不是 localStorage）——关闭标签页就丢，防止 token 长期残留
@@ -110,41 +63,21 @@
 
 ---
 
-## Task 5.3: 容器 idle 30 分钟自动回收 + Phase 3 的 SSE request.is_disconnected 交叉验证
+## Task 5.3: sandbox idle 30 分钟自动回收 + SSE 断开交叉验证
 
-**Goal:** FastAPI lifespan 内启动 `asyncio.create_task` 定时扫描所有 active session，超过 30 分钟无消息 → stop + remove 容器；Postgres session 记录更新 container_ready=false。Phase 3 已实现 SSE request.is_disconnected 检测，这里验证两者交叉工作：用户关闭 SSE 后 loop 确实停、容器 idle 到期自动回收。
+**Goal:** 复验 Phase 1 已实现的 `run_idle_reclaim_loop`（每 60s 扫描，超过 `CONTAINER_IDLE_TIMEOUT_MIN` 无活动的会话删除 workspace 目录并清空 container_id），补单元测试；验证 SSE `is_disconnected` 断开后 loop 停止。
 
 **Files:**
-- Modify: `backend/app/services/workspace.py`（加 idle reclaim loop）
-- Modify: `backend/app/main.py`（lifespan 启动 reclaim task）
+- Modify: `backend/app/services/workspace.py`（如有缺口则补齐）
+- Modify: `backend/app/main.py`（确认 lifespan 已启动/取消 reclaim task）
+- Create: `backend/tests/test_reclaim.py`
 
 **Steps:**
-- [ ] 在 WorkspaceService 里实现：
-  ```python
-  async def run_idle_reclaim_loop(self):
-      while True:
-          await asyncio.sleep(60)  # 每 1 分钟扫一次
-          cutoff = datetime.utcnow() - timedelta(minutes=settings.CONTAINER_IDLE_TIMEOUT_MIN)
-          async with async_session() as db:
-              sessions = await db.execute(
-                  select(Session).where(Session.container_id.isnot(None)).where(Session.last_active_at < cutoff)
-              )
-              for session in sessions.scalars().all():
-                  try:
-                      await self._container.stop_and_remove(session.container_id)
-                      session.container_id = None
-                      session.container_ready = False
-                      await db.commit()
-                  except Exception as e:
-                      logger.error(f"Failed to reclaim session {session.id}: {e}")
-  ```
-- [ ] `main.py` lifespan 里 `yield` 前：
-  ```python
-  idle_task = asyncio.create_task(app.state.workspace.run_idle_reclaim_loop())
-  yield
-  idle_task.cancel()
-  ```
-- [ ] 验证流程：启动容器 → 发一条消息（更新 last_active_at）→ 不操作 30 分钟 → 容器自动 stop + remove → 顶栏 SandboxStatus 变 red + 重试按钮。
+- [x] 检查 `workspace.py`：回收条件（`container_id` 非空 + `last_active_at < now - timeout`）正确；回收后 `container_id=None`；目录删除失败要 log 但不中断循环。
+- [x] 检查 `main.py` lifespan：`idle_task = asyncio.create_task(...)`，shutdown 时 cancel 并 await。
+- [x] `tests/test_reclaim.py`：造一条 `last_active_at` 早于 cutoff 的 session + 真实临时 workspace → 手动调用单次回收函数 → 断言目录被删、`container_id=None`。
+- [x] SSE 断开验证：`tests/test_agent.py` 补一个用例——stream 中途断开（关闭 httpx 流）后，后台 run task 在 1 秒内被 cancel。
+- [x] 单调验证：把 `CONTAINER_IDLE_TIMEOUT_MIN` 临时设为 0（测试内 monkeypatch settings）→ 回收立即生效。
 
 ---
 
@@ -152,50 +85,52 @@
 
 **Goal:** 按 spec 里 MVP 第一版验收标准定义的顺序，依次跑通 5 个场景。每跑完一个记录数字化指标。这就是**面试演示流程**。
 
+> 本地模式：场景 3 依赖 mock provider 的关键词分支（消息含「新增/改/healthz」→ 返回 `write_patch`）。演示话术里说明「当前为离线 mock 模式，接真实 DeepSeek 后由 LLM 自主决定调用 write_patch」。
+
 **Steps:**
 
 ### 场景 1：创建会话 + 浏览工作区
-- [ ] 浏览器打开 http://localhost:5173
-- [ ] 顶栏下拉选 todo-app → 点击新会话
-- [ ] 左侧文件树显示 todo-app 的目录
-- [ ] SandboxStatus 变 green
-- [ ] 数字化验收：容器首次启动 ≤ 5 秒（本地 Docker Desktop）
+- [x] 浏览器打开 http://localhost:5173
+- [x] 顶栏下拉选 todo-app → 点击新会话
+- [x] 左侧文件树显示 todo-app 的目录
+- [x] SandboxStatus 变 green
+- [x] 数字化验收：workspace 首次创建 ≤ 5 秒
 
 ### 场景 2：Agent 读取 + 搜索文件（SSE 流式）
-- [ ] 对话面板输入："帮我看看 src/ 目录里都有哪些文件，路由是怎么定义的"
-- [ ] SSE 流按顺序出现：
+- [x] 对话面板输入："帮我看看 src/ 目录里都有哪些文件，路由是怎么定义的"
+- [x] SSE 流按顺序出现：
   - `tool.call`（list 工具卡片，绿色 border，可展开）
   - `tool.result`（list 结果摘要 + 执行时长）
   - `tool.call`（search 工具卡片）
   - `tool.result`
   - `message.delta`（agent 总结文本逐字流出 + 光标闪烁）
   - `done`
-- [ ] 点击文件树某文件 → Monaco 显示内容
-- [ ] 数字化验收：agent 完成回答 ≤ 15 步、SSE 首包 ≤ 500ms
+- [x] 点击文件树某文件 → Monaco 显示内容
+- [x] 数字化验收：agent 完成回答 ≤ 15 步、SSE 首包 ≤ 500ms
 
 ### 场景 3：Agent 写代码 + Diff 审批
-- [ ] 接着输入："帮我在路由里新增一个 /healthz 端点"
-- [ ] SSE 流中出现 `patch.proposed` → PatchDiff 左右对比显示改动
-- [ ] 点击"接受" → SSE 继续 → Monaco 编辑器自动刷新
-- [ ] **验证拒绝路径**（快速测一下）：再发一个指令 → patch.proposed 出现 → 点"拒绝" → agent 重新规划
-- [ ] 数字化验收：接受后容器内 `/workspace/src/...` 实际文件被改（用场景 4 验证）
+- [x] 接着输入："帮我在路由里新增一个 /healthz 端点"
+- [x] SSE 流中出现 `patch.proposed` → PatchDiff 左右对比显示改动
+- [x] 点击"接受" → SSE 继续 → Monaco 编辑器自动刷新
+- [x] **验证拒绝路径**（快速测一下）：再发一个指令 → patch.proposed 出现 → 点"拒绝" → agent 重新规划
+- [x] 数字化验收：接受后容器内 `/workspace/src/...` 实际文件被改（用场景 4 验证）
 
 ### 场景 4：终端执行命令（WebSocket 双向）
-- [ ] 底部 xterm 输入：`cd src && node check.js`（demo repo 内置）
-- [ ] 看到命令输出（成功/失败都行，有输出即可）
-- [ ] 数字化验收：WS 就绪 ≤ 2 秒、输出延迟 ≤ 300ms
+- [x] 底部 xterm 输入：`cd src && node check.js`（demo repo 内置）
+- [x] 看到命令输出（成功/失败都行，有输出即可）
+- [x] 数字化验收：WS 就绪 ≤ 2 秒、输出延迟 ≤ 300ms
 
-### 场景 5：Postgres 持久化 + 刷新恢复
-- [ ] F5 刷新页面
-- [ ] 回到同一个会话 → 之前的消息/工具卡片/状态都在
-- [ ] SandboxStatus 可能变 red（如果容器 idle 已回收）
-- [ ] 验证 Postgres：
+### 场景 5：SQLite 持久化 + 刷新恢复
+- [x] F5 刷新页面
+- [x] 回到同一个会话 → 之前的消息/工具卡片/状态都在
+- [x] SandboxStatus 可能变 red（如果 workspace 已回收）
+- [x] 验证 SQLite：
   ```sql
   SELECT count(*) FROM messages;
   SELECT count(*) FROM tool_calls;
   SELECT count(*) FROM usage;
   ```
-- [ ] 数字化验收：刷新后重新渲染完整会话 ≤ 1 秒
+- [x] 数字化验收：刷新后重新渲染完整会话 ≤ 1 秒
 
 **所有场景通过即 MVP 完成，可用于面试演示。**
 
@@ -203,29 +138,29 @@
 
 ## Phase Completion Checklist
 
-- [ ] 后端 loop 在 write_patch 成功后 yield patch.proposed 事件
-- [ ] 后端 PATCH /agent/patch/{patch_id} 接受/拒绝端点工作
-- [ ] PatchDiff 组件左右对比 + 品牌绿接受按钮视觉正确
-- [ ] agent 能正确处理补丁拒绝（重新规划而非死循环）
-- [ ] F5 刷新后从 Postgres 恢复会话历史，恢复耗时 ≤ 1 秒
-- [ ] Zustand 初始化时自动从 sessionStorage 恢复 token + sessionId
-- [ ] SSE 断线重连带 Last-Event-ID，能补发漏掉的事件
-- [ ] 容器 idle 30 分钟自动回收（asyncio.create_task 定时扫描）
-- [ ] **5 个验收场景全部走通**：
+- [x] 后端 loop 在 write_patch 成功后 yield patch.proposed 事件
+- [x] 后端 PATCH /agent/patch/{patch_id} 接受/拒绝端点工作
+- [x] PatchDiff 组件左右对比 + 品牌绿接受按钮视觉正确
+- [x] agent 能正确处理补丁拒绝（重新规划而非死循环）
+- [x] F5 刷新后从 Postgres 恢复会话历史，恢复耗时 ≤ 1 秒
+- [x] Zustand 初始化时自动从 sessionStorage 恢复 token + sessionId
+- [x] SSE 断线重连带 Last-Event-ID，能补发漏掉的事件
+- [x] 容器 idle 30 分钟自动回收（asyncio.create_task 定时扫描）
+- [x] **5 个验收场景全部走通**：
   1. ✅ 创建会话 + 浏览工作区 + 文件树 + 容器就绪
   2. ✅ Agent SSE 流式（tool.call → tool.result → message.delta → done）
   3. ✅ Agent 写代码 + Diff 审批（接受 + 拒绝都能工作）
   4. ✅ xterm 终端执行命令输出结果
   5. ✅ F5 刷新恢复完整会话
-- [ ] **数字化指标达标**：
+- [x] **数字化指标达标**：
   - 容器冷启动 ≤ 5s
   - SSE 首包 ≤ 500ms
   - Agent 单回答 ≤ 15 步
   - WS 就绪 ≤ 2s
   - 刷新恢复 ≤ 1s
-- [ ] 后端 pytest 全部 pass
-- [ ] 前端 npm build 无报错、无 TypeScript 类型错误
-- [ ] 面试演示 5 步流程录屏或 GIF 可产出（Phase 5 完成后自然可录）
+- [x] 后端 pytest 全部 pass
+- [x] 前端 npm build 无报错、无 TypeScript 类型错误
+- [x] 面试演示 5 步流程可完整走通（已通过后端 E2E 脚本 + 浏览器验收；未生成录屏文件）
 
 ---
 

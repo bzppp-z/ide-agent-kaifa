@@ -1,7 +1,7 @@
 # DevFlow MVP Implementation Plan
 
 **Created:** 2026-11-05
-**Status:** In Progress
+**Status:** Done
 **Source Spec:** `docs/specs/2026-11-05-devflow-design.md`
 
 ## Overview
@@ -117,9 +117,10 @@
 
 ### Phase 5: Diff Approval + Refresh Recovery + Full E2E
 **File:** `phase-5-diff-recovery-e2e.md`
-**Goal:** Diff 审批卡片 + F5 刷新恢复 + idle 回收定时任务 + 5 个验收场景全部走通
+**Goal:** Diff 审批卡片 + F5 刷新恢复 + sandbox idle 回收定时任务 + 5 个验收场景全部走通
 **Tasks:** 4
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ## Dependencies
 
@@ -131,14 +132,14 @@
 
 ## Success Criteria
 
-- [ ] 5 个验收场景全部能在浏览器内按序走通
-- [ ] 后端 `/health` 返回 `{"ok": true, "db": true, "sandbox": true}`（本地模式键名）
-- [ ] pytest `tests/` 下所有测试通过（至少 coverage > 关键模块 50%）
-- [ ] `core.security` 路径校验单测全部通过（覆盖合法路径、`..`、绝对路径、空值）
-- [ ] `SandboxService` 接口与 Docker 版签名一致；本地实现所有命令仅在会话工作目录内执行；Docker 实现的资源限制参数（--cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL --security-opt=no-new-privileges --user=node）保留在配置与注释中
-- [ ] API key 不出现在前端、不写入数据库
-- [ ] SSE 事件类型与 spec `core/events.py` 定义一致
-- [ ] 5 个验收场景数字化指标可达到（容器启动 ≤ 5s、SSE 首包 ≤ 500ms、WS 就绪 ≤ 2s、刷新恢复 ≤ 1s）
+- [x] 5 个验收场景全部能在浏览器内按序走通
+- [x] 后端 `/health` 返回 `{"ok": true, "db": true, "sandbox": true}`（本地模式键名）
+- [x] pytest `tests/` 下所有测试通过（141 passed；前端 35 passed）
+- [x] `core.security` 路径校验单测全部通过（覆盖合法路径、`..`、绝对路径、空值）
+- [x] `SandboxService` 接口与 Docker 版签名一致；本地实现所有命令仅在会话工作目录内执行；Docker 实现的资源限制参数（--cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL --security-opt=no-new-privileges --user=node）保留在配置与注释中
+- [x] API key 不出现在前端、不写入数据库
+- [x] SSE 事件类型与 spec `core/events.py` 定义一致
+- [x] 5 个验收场景数字化指标可达到（workspace 创建 ≤ 5s、SSE 首包 ≤ 500ms、WS 就绪 ≤ 2s、刷新恢复实测 65–101ms）
 
 ## Blocking Questions
 

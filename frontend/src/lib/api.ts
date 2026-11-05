@@ -3,6 +3,7 @@ import { SseParser } from "./sseParser";
 import type {
   FileContent,
   FileWriteResult,
+  PatchDecisionResult,
   RunCreated,
   SessionCreated,
   SessionDetail,
@@ -127,6 +128,20 @@ export function writeFile(
 
 export function terminalWsUrl(sessionId: string, token: string): string {
   return wsUrl(`/terminal/ws/${sessionId}?token=${encodeURIComponent(token)}`);
+}
+
+/** 登记对 patch 的接受/拒绝决议（token 由 apiFetch 从 session store 读取）。 */
+export function respondPatch(
+  patchId: string,
+  accepted: boolean,
+): Promise<PatchDecisionResult> {
+  return apiFetch<PatchDecisionResult>(
+    `/agent/patch/${encodeURIComponent(patchId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ accepted }),
+    },
+  );
 }
 
 /**

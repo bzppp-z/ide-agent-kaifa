@@ -35,7 +35,7 @@ from app.core.events import (
 from app.db import get_db_session, utcnow
 from app.models.message import Message as MessageModel
 from app.models.tool_call import ToolCall as ToolCallModel
-from app.schemas.agent import AgentRunRequest, AgentRunResponse
+from app.schemas.agent import AgentRunRequest, AgentRunResponse, PatchDecisionRequest
 from app.services.agent.loop import AgentLoop
 from app.services.agent.tools import ToolRegistry
 from app.services.auth import record_usage
@@ -128,6 +128,30 @@ async def stream_agent(
     )
 
 
+@router.patch("/agent/patch/{patch_id}")
+async def respond_patch(
+    patch_id: str,
+    body: PatchDecisionRequest,
+    request: Request,
+    current_session: str = Depends(get_current_session),
+) -> dict:
+    """登记用户对 patch 的决议；未知 patch_id 400/404，非本会话 403。"""
+    registry = request.app.state.pending_patches
+    pending = registry.get(patch_id)
+    if pending is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="patch not found or already resolved"
+        )
+    if pending.session_id != current_session:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="patch does not belong to this session",
+        )
+
+    registry.resolve(patch_id, body.accepted)
+    return {"ok": True, "patch_id": patch_id, "accepted": body.accepted}
+
+
 # ---------------------------------------------------------------- background loop
 
 
@@ -148,6 +172,7 @@ async def _drive_agent_loop(
             tools=ToolRegistry(),
             sandbox=app.state.sandbox,
             history=history,
+            pending_patches=app.state.pending_patches,
         )
         settings = app.state.settings
         async for event in loop.run_stream(

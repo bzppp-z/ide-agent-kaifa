@@ -111,6 +111,7 @@ class ToolRegistry:
         args: dict[str, Any],
         sandbox: SandboxService,
         workspace_path: str,
+        dry_run: bool = False,
     ) -> ToolResult:
         if not isinstance(args, dict):
             args = {}
@@ -123,7 +124,7 @@ class ToolRegistry:
         elif name == "search":
             result = self._search(args, sandbox, workspace_path)
         elif name == "write_patch":
-            result = self._write_patch(args, sandbox, workspace_path)
+            result = self._write_patch(args, sandbox, workspace_path, dry_run=dry_run)
         else:
             result = ToolResult(ok=False, summary=f"unknown tool: {name}")
 
@@ -259,7 +260,11 @@ class ToolRegistry:
         )
 
     def _write_patch(
-        self, args: dict[str, Any], sandbox: SandboxService, workspace_path: str
+        self,
+        args: dict[str, Any],
+        sandbox: SandboxService,
+        workspace_path: str,
+        dry_run: bool = False,
     ) -> ToolResult:
         raw_path = _require_str_arg(args, "path")
         search = _require_str_arg(args, "search")
@@ -283,13 +288,26 @@ class ToolRegistry:
             )
 
         after = before.replace(search, replace, 1)
+        if dry_run:
+            return ToolResult(
+                ok=True,
+                summary=f"patch preview for {relative}",
+                details=f"would replace 1 occurrence in {relative}",
+                extra={
+                    "path": relative,
+                    "before": before,
+                    "after": after,
+                    "applied": False,
+                },
+            )
+
         sandbox.write_file(workspace_path, relative, after)
 
         return ToolResult(
             ok=True,
             summary=f"patched {relative}",
             details=f"replaced 1 occurrence in {relative}",
-            extra={"path": relative, "before": before, "after": after},
+            extra={"path": relative, "before": before, "after": after, "applied": True},
         )
 
 

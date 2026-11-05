@@ -8,8 +8,10 @@
 """
 
 import copy
+import difflib
 import hashlib
 import json
+import time
 from collections import deque
 from collections.abc import AsyncIterator
 from typing import Any
@@ -19,16 +21,21 @@ from app.core.events import (
     BaseSSEEvent,
     DoneEvent,
     MessageDeltaEvent,
+    PatchProposedEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from app.services.agent.context import truncate_messages
+from app.services.agent.pending import PendingPatchRegistry
 from app.services.agent.provider import LLMProvider, ToolCallChunk
-from app.services.agent.tools import ToolRegistry
+from app.services.agent.tools import ToolRegistry, ToolResult
 from app.services.sandbox import SandboxService
 
 MAX_STEPS_DEFAULT = 25
 MAX_TOKENS_DEFAULT = 200000
+PATCH_APPROVAL_TIMEOUT_SECONDS = 120.0
+
+REJECTED_PATCH_SUMMARY = "user rejected the patch"
 
 
 class RecentToolCallTracker:
@@ -73,11 +80,13 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         sandbox: SandboxService | None = None,
         history: list[dict] | None = None,
+        pending_patches: PendingPatchRegistry | None = None,
     ) -> None:
         self.provider = provider
         self.tools = tools
         self.sandbox = sandbox
         self.history = history or []
+        self.pending_patches = pending_patches
 
     async def run_stream(
         self,
@@ -90,6 +99,7 @@ class AgentLoop:
         max_steps: int = MAX_STEPS_DEFAULT,
         max_tokens: int = MAX_TOKENS_DEFAULT,
         run_id: str | None = None,
+        patch_approval_timeout: float = PATCH_APPROVAL_TIMEOUT_SECONDS,
     ) -> AsyncIterator[BaseSSEEvent]:
         provider = provider or self.provider
         tools = tools or self.tools
@@ -160,8 +170,55 @@ class AgentLoop:
             for tool_call, call_id, arguments in prepared:
                 tool_name = tool_call.name or ""
                 yield ToolCallEvent(call_id=call_id, tool_name=tool_name, arguments=arguments)
+                started_at = time.perf_counter()
 
-                result = await tools.call(tool_name, arguments, sandbox, session_workspace_path)
+                if tool_name == "write_patch" and self.pending_patches is not None:
+                    preview = await tools.call(
+                        "write_patch",
+                        arguments,
+                        sandbox,
+                        session_workspace_path,
+                        dry_run=True,
+                    )
+                    if preview.ok and preview.extra:
+                        patch_id, proposed = self._prepare_patch(
+                            session_id=session_id,
+                            arguments=arguments,
+                            preview=preview,
+                        )
+                        yield proposed
+                        try:
+                            accepted = await self.pending_patches.wait(
+                                patch_id, timeout=patch_approval_timeout
+                            )
+                        finally:
+                            self.pending_patches.discard(patch_id)
+
+                        if accepted:
+                            result = await tools.call(
+                                "write_patch", arguments, sandbox, session_workspace_path
+                            )
+                        else:
+                            preview.duration_ms = int(
+                                (time.perf_counter() - started_at) * 1000
+                            )
+                            result = ToolResult(
+                                ok=False,
+                                summary=REJECTED_PATCH_SUMMARY,
+                                details="用户拒绝了该修改，请重新规划。",
+                                extra={
+                                    "patch_id": patch_id,
+                                    "rejected": True,
+                                    "duration_ms": preview.duration_ms,
+                                },
+                            )
+                    else:
+                        result = preview
+                else:
+                    result = await tools.call(
+                        tool_name, arguments, sandbox, session_workspace_path
+                    )
+
                 tracker.record(tool_name, arguments)
 
                 yield ToolResultEvent(
@@ -206,6 +263,43 @@ class AgentLoop:
 
     # --------------------------------------------------------------- internal
 
+    def _prepare_patch(
+        self,
+        *,
+        session_id: str,
+        arguments: dict[str, Any],
+        preview: ToolResult,
+    ) -> tuple[str, PatchProposedEvent]:
+        """把 dry_run 结果转换成待审批条目并注册，返回 (patch_id, 事件)。
+
+        调用方必须先 yield 事件再 await registry.wait，否则前端永远看不到审批卡片。
+        """
+        assert self.pending_patches is not None
+        patch_id = str(uuid4())
+        path = str(preview.extra.get("path") or arguments.get("path") or "")
+        before = str(preview.extra.get("before") or "")
+        after = str(preview.extra.get("after") or "")
+        event = PatchProposedEvent(
+            patch_id=patch_id,
+            path=path,
+            search=str(arguments.get("search") or ""),
+            replace=str(arguments.get("replace") or ""),
+            before=before,
+            after=after,
+            diff=_render_patch_diff(path, before, after),
+        )
+        self.pending_patches.register(
+            patch_id,
+            session_id=session_id,
+            path=path,
+            search=event.search,
+            replace=event.replace,
+            before=before,
+            after=after,
+            diff=event.diff,
+        )
+        return patch_id, event
+
     def _build_messages(self, user_message: str, tools: ToolRegistry) -> list[dict]:
         descriptions = []
         for schema in tools.to_schema():
@@ -227,6 +321,17 @@ class AgentLoop:
         messages.extend(copy.deepcopy(self.history))
         messages.append({"role": "user", "content": user_message})
         return messages
+
+
+def _render_patch_diff(path: str, before: str, after: str) -> str:
+    lines = difflib.unified_diff(
+        before.splitlines(),
+        after.splitlines(),
+        fromfile=f"a/{path}",
+        tofile=f"b/{path}",
+        lineterm="",
+    )
+    return "\n".join(lines)
 
 
 def _normalize_arguments(arguments: dict[str, Any] | str) -> dict[str, Any]:

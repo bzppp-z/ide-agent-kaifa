@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { formatError, runAgent } from "../lib/api";
-import type { SSEEvent } from "../lib/types";
+import type { Message, SSEEvent } from "../lib/types";
 
 // ------------------------------------------------------------------ chat items
 
@@ -37,6 +37,10 @@ export interface ChatPatchItem {
   path: string;
   search: string;
   replace: string;
+  before?: string;
+  after?: string;
+  diff?: string;
+  status: "pending" | "accepted" | "rejected";
 }
 
 export interface ChatOutputItem {
@@ -88,7 +92,11 @@ interface ChatState {
   sseAbort: AbortController | null;
   sendMessage: (sessionId: string, text: string) => Promise<void>;
   pushEvent: (event: SSEEvent) => void;
+  /** 刷新恢复：用 GET session 返回的历史消息重建气泡（不覆盖正在流式的 run）。 */
+  loadHistory: (messages: Message[]) => void;
   setSseAbort: (controller: AbortController | null) => void;
+  /** 标记某个 patch 卡片的处理结果（PatchDiff 在决议成功后调用）。 */
+  setPatchStatus: (patchId: string, status: "accepted" | "rejected") => void;
   /** 主动停止：断开 SSE 并把在写消息收尾。 */
   stopStreaming: () => void;
   endStream: () => void;
@@ -233,6 +241,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             path: event.path,
             search: event.search,
             replace: event.replace,
+            before: event.before,
+            after: event.after,
+            diff: event.diff,
+            status: "pending",
           });
           return { items };
         }
@@ -292,6 +304,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSseAbort: (controller) => set({ sseAbort: controller }),
 
+  loadHistory: (messages) => {
+    if (get().streaming) return;
+
+    const items: ChatItem[] = [];
+    for (const message of messages) {
+      if (message.role === "user") {
+        items.push({
+          id: nextId("user"),
+          kind: "user",
+          content: message.content,
+          createdAt: Date.parse(message.created_at) || Date.now(),
+        });
+        continue;
+      }
+      if (message.role !== "assistant") continue;
+
+      const patch = parsePatchMessage(message.content);
+      if (patch) {
+        items.push(patch);
+        continue;
+      }
+      if (message.content.trim()) {
+        items.push({
+          id: nextId("assistant"),
+          kind: "assistant",
+          content: message.content,
+          streaming: false,
+        });
+      }
+    }
+    set({ items });
+  },
+
+  setPatchStatus: (patchId, status) =>
+    set((state) => ({
+      items: state.items.map((item) =>
+        item.kind === "patch" && item.patchId === patchId
+          ? { ...item, status }
+          : item,
+      ),
+    })),
+
   stopStreaming: () => {
     get().sseAbort?.abort();
     set((state) => ({
@@ -325,3 +379,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
 }));
 
 export type { SSEEvent as SseEvent } from "../lib/types";
+
+/**
+ * 后端把 patch.proposed 事件整体存成一条 assistant 消息（JSON 字符串）。
+ * 刷新恢复时把它还原成审批卡片；解析失败则按普通文本处理。
+ */
+function parsePatchMessage(content: string): ChatPatchItem | null {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith("{")) return null;
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (parsed.type !== "patch.proposed") return null;
+
+  const patchId = parsed.patch_id;
+  const path = parsed.path;
+  if (typeof patchId !== "string" || typeof path !== "string") return null;
+
+  const asString = (value: unknown): string | undefined =>
+    typeof value === "string" ? value : undefined;
+
+  return {
+    id: nextId("patch"),
+    kind: "patch",
+    patchId,
+    path,
+    search: asString(parsed.search) ?? "",
+    replace: asString(parsed.replace) ?? "",
+    before: asString(parsed.before),
+    after: asString(parsed.after),
+    diff: asString(parsed.diff),
+    status: "pending",
+  };
+}

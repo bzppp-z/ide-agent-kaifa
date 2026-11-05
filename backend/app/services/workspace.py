@@ -100,8 +100,10 @@ class WorkspaceService:
             for row in rows:
                 try:
                     await self.sandbox.stop_and_remove(row.container_id)
-                except ValueError:
-                    logger.warning("skip reclaiming stale workspace: %s", row.container_id)
+                except Exception:
+                    # 单条清理失败不能中断整轮回收；保留 container_id 等下一轮重试
+                    logger.exception("failed to reclaim workspace: %s", row.container_id)
+                    continue
                 row.container_id = None
                 reclaimed.append(row.id)
 

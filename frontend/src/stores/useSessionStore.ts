@@ -17,17 +17,44 @@ export const DEMO_REPOS = [
   "python-flask-demo",
 ] as const;
 
+const TOKEN_KEY = "devflow_token";
+const SESSION_KEY = "devflow_session_id";
+
+/** sessionStorage 在 SSR / 测试环境可能不存在，统一做空值保护。 */
+function safeStorage(): Storage | null {
+  try {
+    return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function persistSession(id: string, token: string): void {
+  const storage = safeStorage();
+  if (!storage) return;
+  storage.setItem(SESSION_KEY, id);
+  storage.setItem(TOKEN_KEY, token);
+}
+
+function clearPersistedSession(): void {
+  const storage = safeStorage();
+  if (!storage) return;
+  storage.removeItem(SESSION_KEY);
+  storage.removeItem(TOKEN_KEY);
+}
+
 interface SessionState {
   id: string | null;
-  /** 仅存内存（Zustand），刷新页面即丢失。 */
   token: string | null;
   demoRepo: string;
   containerStatus: ContainerStatus;
   creating: boolean;
   error: string | null;
   createSession: (demoRepo?: string) => Promise<boolean>;
-  /** 用已有 id + token 恢复会话（Phase 5 持久化入口，当前仅重建内存态）。 */
+  /** 用已有 id + token 恢复会话：拉历史消息 + 重建文件树。 */
   restoreSession: (id: string, token: string) => Promise<boolean>;
+  /** 页面挂载入口：sessionStorage 有凭据则恢复，否则新建会话。 */
+  bootstrap: () => Promise<boolean>;
   setDemoRepo: (repo: string) => void;
   setContainerStatus: (status: ContainerStatus) => void;
   /** 重新拉取根目录以探测 / 恢复沙箱状态（失败置 red）。 */
@@ -70,6 +97,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         demoRepo: created.demo_repo,
         creating: false,
       });
+      persistSession(created.id, created.token);
 
       // 立即请求根目录，触发 workspace 懒初始化；成功即沙箱就绪（green）。
       await get().refreshSandbox();
@@ -88,11 +116,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ id, token, creating: true, containerStatus: "yellow", error: null });
     try {
       const detail = await getSession(id);
+      useChatStore.getState().loadHistory(detail.messages);
       set({
         demoRepo: detail.demo_repo,
         creating: false,
         containerStatus: detail.container_ready ? "green" : "yellow",
       });
+      persistSession(id, token);
       await get().refreshSandbox();
       return true;
     } catch (error) {
@@ -103,6 +133,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
       return false;
     }
+  },
+
+  bootstrap: async () => {
+    const storage = safeStorage();
+    const id = storage?.getItem(SESSION_KEY) ?? null;
+    const token = storage?.getItem(TOKEN_KEY) ?? null;
+
+    if (id && token) {
+      const restored = await get().restoreSession(id, token);
+      if (restored) return true;
+      // 凭据失效（过期/被删）：清掉后重新建会话
+      clearPersistedSession();
+    }
+    return get().createSession();
   },
 
   refreshSandbox: async () => {
@@ -117,12 +161,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  reset: () =>
+  reset: () => {
+    clearPersistedSession();
     set({
       id: null,
       token: null,
       containerStatus: "yellow",
       creating: false,
       error: null,
-    }),
+    });
+  },
 }));

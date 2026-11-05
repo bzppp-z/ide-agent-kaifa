@@ -309,3 +309,44 @@ async def test_sse_disconnect_cancels_background_task(api):
     assert chunks == []
     assert dummy_task.cancelled()
     assert session_id not in loop_states
+
+
+async def test_sse_midstream_disconnect_cancels_run_task_within_second(api):
+    """客户端在收到部分事件后断开：后台 run task 必须在 1 秒内被取消。"""
+    from app.api.agent import sse_event_generator
+    from app.core.events import MessageDeltaEvent
+    from app.db import SessionLocal
+
+    class MidStreamDisconnect:
+        def __init__(self, disconnect_after_checks: int) -> None:
+            self.checks = 0
+            self._after = disconnect_after_checks
+
+        async def is_disconnected(self) -> bool:
+            self.checks += 1
+            return self.checks > self._after
+
+    session = await _create_session(api)
+    session_id = session["id"]
+
+    queue: asyncio.Queue = asyncio.Queue()
+    queue.put_nowait(MessageDeltaEvent(content="部分输出"))
+    run_task = asyncio.create_task(asyncio.sleep(30))
+    state = {"task": run_task, "queue": queue, "run_id": "run-mid-disconnect"}
+    loop_states = {session_id: state}
+    request = MidStreamDisconnect(disconnect_after_checks=1)
+
+    chunks = [
+        chunk
+        async for chunk in sse_event_generator(
+            request, session_id, state, loop_states, SessionLocal
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert "message.delta" in chunks[0]
+    await asyncio.wait_for(
+        asyncio.gather(run_task, return_exceptions=True), timeout=1.0
+    )
+    assert run_task.cancelled()
+    assert session_id not in loop_states

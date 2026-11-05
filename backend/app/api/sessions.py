@@ -5,6 +5,7 @@
 - DELETE /sessions/{id}：清理 workspace 并清空 container_id（会话与消息保留）。
 """
 
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -83,11 +84,17 @@ async def create_session(
 @router.get("/{session_id}", response_model=SessionDetailResponse)
 async def get_session(
     session_id: str,
+    request: Request,
     current_session: str = Depends(get_current_session),
     db: AsyncSession = Depends(get_db_session),
 ) -> SessionDetailResponse:
     ensure_session_ownership(session_id, current_session)
     row = await load_session_or_404(db, session_id)
+
+    # 刷新恢复：workspace 可能已被 idle 回收，container_id 失效时清空并写回。
+    if row.container_id and not Path(row.container_id).is_dir():
+        row.container_id = None
+        await db.commit()
 
     messages = (
         (
