@@ -1,0 +1,198 @@
+import { useSessionStore } from "../stores/useSessionStore";
+import { SseParser } from "./sseParser";
+import type {
+  FileContent,
+  FileWriteResult,
+  RunCreated,
+  SessionCreated,
+  SessionDetail,
+  SSEEvent,
+} from "./types";
+import { encodePath } from "./utils";
+
+/** 后端基地址：默认本地 uvicorn；可用 VITE_API_BASE 覆盖（兼容旧名 VITE_API_BASE_URL）。 */
+export const API_BASE = (
+  import.meta.env.VITE_API_BASE ??
+  import.meta.env.VITE_API_BASE_URL ??
+  "http://localhost:8000"
+).replace(/\/+$/, "");
+
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
+/** http:// → ws://，用于终端 WebSocket。 */
+export function wsUrl(path: string): string {
+  return `${API_BASE.replace(/^http/i, "ws")}${path}`;
+}
+
+export function encodeFilePath(path: string): string {
+  return encodePath(path);
+}
+
+/** 根目录必须带末尾斜杠（后端 `{path:path}` 会因此匹配空串）。 */
+export function fileUrl(sessionId: string, path: string): string {
+  const encoded = encodePath(path);
+  return encoded
+    ? `/files/${sessionId}/${encoded}`
+    : `/files/${sessionId}/`;
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+export async function apiFetch<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  const token = useSessionStore.getState().token;
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const res = await fetch(apiUrl(path), { ...init, headers });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(res.status, detail || `请求失败（HTTP ${res.status}）`);
+  }
+  if (res.status === 204) {
+    return undefined as T;
+  }
+  return (await res.json()) as T;
+}
+
+export function formatError(error: unknown): string {
+  if (error instanceof ApiError) {
+    try {
+      const parsed = JSON.parse(error.message) as { detail?: string };
+      if (parsed?.detail) return parsed.detail;
+    } catch {
+      // 非 JSON 错误体，直接使用原文
+    }
+    return error.message;
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+// ---------------------------------------------------------------- typed client
+
+export function createSession(demoRepo: string): Promise<SessionCreated> {
+  return apiFetch<SessionCreated>("/sessions", {
+    method: "POST",
+    body: JSON.stringify({ demo_repo: demoRepo }),
+  });
+}
+
+export function getSession(sessionId: string): Promise<SessionDetail> {
+  return apiFetch<SessionDetail>(`/sessions/${sessionId}`);
+}
+
+export function deleteSession(sessionId: string): Promise<{ ok: true }> {
+  return apiFetch<{ ok: true }>(`/sessions/${sessionId}`, { method: "DELETE" });
+}
+
+export function runAgent(sessionId: string, message: string): Promise<RunCreated> {
+  return apiFetch<RunCreated>(`/sessions/${sessionId}/run`, {
+    method: "POST",
+    body: JSON.stringify({ message }),
+  });
+}
+
+export function getFile(sessionId: string, path: string): Promise<FileContent> {
+  return apiFetch<FileContent>(fileUrl(sessionId, path));
+}
+
+export function writeFile(
+  sessionId: string,
+  path: string,
+  content: string,
+): Promise<FileWriteResult> {
+  return apiFetch<FileWriteResult>(fileUrl(sessionId, path), {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function terminalWsUrl(sessionId: string, token: string): string {
+  return wsUrl(`/terminal/ws/${sessionId}?token=${encodeURIComponent(token)}`);
+}
+
+/**
+ * fetch + ReadableStream 手写 SSE 解析（EventSource 无法携带 Authorization）。
+ * 正常收到 done 返回 "done"；流提前结束时返回 "ended"。
+ */
+export async function streamEvents(
+  sessionId: string,
+  token: string,
+  signal: AbortSignal,
+  onEvent: (event: SSEEvent) => void,
+): Promise<"done" | "ended"> {
+  const res = await fetch(apiUrl(`/agent/stream/${sessionId}`), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "text/event-stream",
+    },
+    signal,
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(
+      res.status,
+      detail || `SSE 连接失败（HTTP ${res.status}）`,
+    );
+  }
+  if (!res.body) throw new Error("SSE 响应没有 body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new SseParser();
+  let doneSeen = false;
+
+  const dispatch = (event: string, data: string): void => {
+    try {
+      const parsed: unknown = JSON.parse(data);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return;
+      }
+      const payload = { type: event, ...(parsed as Record<string, unknown>) };
+      if (event === "done") doneSeen = true;
+      onEvent(payload as SSEEvent);
+    } catch {
+      // 非法 JSON：忽略该事件，保持流不中断
+    }
+  };
+
+  const consume = (chunk: string): void => {
+    for (const parsed of parser.feed(chunk)) {
+      dispatch(parsed.event, parsed.data);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    consume(decoder.decode(value, { stream: true }));
+  }
+
+  const tail = decoder.decode();
+  if (tail) consume(tail);
+  for (const parsed of parser.flush()) {
+    dispatch(parsed.event, parsed.data);
+  }
+
+  return doneSeen ? "done" : "ended";
+}

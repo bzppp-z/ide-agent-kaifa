@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    @apply bg-bg text-text font-sans antialiased;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  ::selection {
+    background: rgba(15, 220, 120, 0.28);
+    color: #ffffff;
+  }
+
+  /* 细窄滚动条，贴合 IDE 观感 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0b0d0e;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #23282d;
+    border-radius: 999px;
+    border: 2px solid #0b0d0e;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #2e343a;
+  }
+}
+
+/* 唯一允许的循环动画：流式输出光标 */
+@keyframes devflow-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.stream-cursor {
+  display: inline-block;
+  width: 0.5em;
+  margin-left: 1px;
+  color: #0fdc78;
+  animation: devflow-blink 1s step-end infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stream-cursor {
+    animation: none;
+  }
+}
+
+/* xterm 容器背景与主界面统一 */
+.xterm .xterm-viewport {
+  background-color: #0b0d0e !important;
+}
+
+.xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm-viewport::-webkit-scrollbar-track {
+  background: #0b0d0e;
+}
+
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: #23282d;
+}
+
+/* Monaco 容器底色（编辑器内主题由 defineTheme 控制） */
+.monaco-editor,
+.monaco-editor-background,
+.monaco-editor .overflow-guard {
+  background-color: #0b0d0e;
+}

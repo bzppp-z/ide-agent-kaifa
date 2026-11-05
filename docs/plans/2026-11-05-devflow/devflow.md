@@ -112,7 +112,8 @@
 **File:** `phase-4-frontend-ui.md`
 **Goal:** React SPA 三栏布局 + Monaco + xterm + shadcn + Zustand stores + SSE/WS hooks + 品牌绿视觉，浏览器打开能看到完整界面 + 能连后端 + SSE/WS 跑通
 **Tasks:** 6
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ### Phase 5: Diff Approval + Refresh Recovery + Full E2E
 **File:** `phase-5-diff-recovery-e2e.md`
