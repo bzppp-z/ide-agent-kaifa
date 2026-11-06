@@ -1,9 +1,8 @@
 # DevFlow
 
 [![CI](https://github.com/bzppp-z/ide-agent-kaifa/actions/workflows/ci.yml/badge.svg)](https://github.com/bzppp-z/ide-agent-kaifa/actions/workflows/ci.yml)
-![Python](https://img.shields.io/badge/Python-3.12-3776AB)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)
-![React](https://img.shields.io/badge/React-19-61DAFB)
+
+**技术栈**：Python 3.12 · FastAPI · React 19 · TypeScript · SQLite · Monaco / xterm
 
 > 一个跑在本地的 AI Coding Agent：用自然语言让模型读写你的代码、执行命令，每一步改动都能审批、回滚、复盘。
 
@@ -37,35 +36,17 @@ DevFlow 不是聊天界面加一个"生成代码"按钮。它把模型放进一�
 
 ## 架构
 
-```mermaid
-flowchart LR
-  subgraph Browser[浏览器]
-    UI[React UI<br/>Monaco / xterm / Zustand]
-  end
-
-  subgraph Backend[FastAPI 后端]
-    API[REST + SSE + WebSocket]
-    Loop[AgentLoop]
-    Tools[Tool Registry]
-    WS[Workspace / Sandbox]
-    CP[Checkpoint Service]
-    IDX[Repo Index]
-  end
-
-  DB[(SQLite)]
-  LLM[DeepSeek / MockProvider]
-  FS[(本地 Workspace)]
-
-  UI -->|HTTP / SSE / WS| API
-  API --> Loop
-  Loop --> LLM
-  Loop --> Tools
-  Tools --> WS
-  WS --> FS
-  API --> CP
-  CP --> FS
-  Tools --> IDX
-  API --> DB
+```text
+浏览器（React + Monaco 编辑器 + xterm 终端 + Zustand）
+   │  HTTP / SSE / WebSocket
+   ▼
+FastAPI
+   ├─ REST 路由 ───────────────► SQLite（会话 / 消息 / 事件 / 变更记录）
+   ├─ AgentLoop ───► LLM Provider（DeepSeek / MockProvider）
+   │      │
+   │      └────────► Tool Registry ──► Workspace / Sandbox（本地目录）
+   ├─ Checkpoint Service ──────► 本地 Workspace 快照
+   └─ Repo Index ──────────────► 符号索引 / 文本检索
 ```
 
 一次请求的完整链路：浏览器 `POST /sessions/{id}/run` → 后端启动 AgentLoop → 模型返回工具调用 → 工具真实操作 workspace → 结果回灌模型 → SSE 把事件推回浏览器 → 需要审批时挂起等待 → `done` 结束。刷新页面后从 SQLite 重建历史。
