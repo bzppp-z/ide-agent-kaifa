@@ -56,32 +56,15 @@ npm run dev
 ### 场景 5：终端 + idle 回收
 1. 打开底部终端面板，执行 `echo hello`，应回显输出（WebSocket `/terminal/ws/{session_id}`）。
 2. idle 回收：后端每 60 秒扫描一次，清理 `last_active_at` 超过 `CONTAINER_IDLE_TIMEOUT_MIN`（默认 30 分钟）的 workspace，目录删除且 `container_id` 置空。
-3. 单元验证：`backend/tests/test_reclaim.py`（含「单条回收抛错不中断循环」）。
 
-## 3. 自动化验收
-
-后端全量测试（141 passed）：
-
-```powershell
-cd backend
-C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe -m pytest -q
-```
-
-Phase 5 端到端脚本（对已启动的后端跑 5 场景，无需前端）：
-
-```powershell
-cd backend
-C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe scripts\e2e_phase5.py --base-url http://127.0.0.1:8000
-```
-
-前端验证：
+## 3. 构建校验
 
 ```powershell
 cd frontend
-npm test        # 35 passed
 npm run typecheck
 npm run build
 ```
+
 
 ## 4. Mock 模式与真实 DeepSeek
 

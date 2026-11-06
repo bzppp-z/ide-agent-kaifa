@@ -40,14 +40,6 @@ Invoke-RestMethod http://localhost:8000/health
 # True True True
 ```
 
-## 测试
-
-```powershell
-C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe -m pytest -v
-```
-
-测试使用临时目录中的 SQLite 与临时 workspace 根目录，不会污染仓库内的 `devflow.db` / `workspaces/`。
-
 ## 安全说明
 
 - `app/core/security.py:validate_workspace_path` 是唯一的路径安全防线，所有文件读写都必须经过它。
