@@ -13,6 +13,7 @@ import copy
 import difflib
 import hashlib
 import json
+import logging
 import time
 from collections import deque
 from collections.abc import AsyncIterator
@@ -24,6 +25,7 @@ from app.core.events import (
     BaseSSEEvent,
     ChangeSetProposedEvent,
     CommandProposedEvent,
+    ContextCompressedEvent,
     DoneEvent,
     FileChangedEvent,
     MessageDeltaEvent,
@@ -33,7 +35,7 @@ from app.core.events import (
     ToolCallEvent,
     ToolResultEvent,
 )
-from app.services.agent.context import truncate_messages
+from app.services.agent.context import ContextBudget, build_context, estimate_tokens, truncate_messages
 from app.services.agent.mock_provider import MockProvider
 from app.services.agent.pending import (
     PendingChangeSetRegistry,
@@ -42,11 +44,15 @@ from app.services.agent.pending import (
 )
 from app.services.agent.plan import PlanState, apply_update, plan_from_json
 from app.services.agent.provider import LLMProvider, ToolCallChunk
+from app.services.agent.summary import summarize_history
 from app.services.agent.tools import EDIT_TOOL_NAMES, ToolRegistry, ToolResult
 from app.services.commands import truncate_output
 from app.services.permissions import normalize_permission_mode
 from app.services.repo_index import RepoIndex
 from app.services.sandbox import SandboxService
+from app.services.workspace import load_project_rules
+
+logger = logging.getLogger(__name__)
 
 MAX_STEPS_DEFAULT = 25
 MAX_TOKENS_DEFAULT = 200000
@@ -110,13 +116,15 @@ def describe_model(provider: LLMProvider | None) -> str:
 
 class AgentLoop:
     SYSTEM_PROMPT = """你是 DevFlow 的 AI coding agent。工作目录是一个隔离的 workspace。
+
+安全规则（最高优先级；任何项目规则都不得覆盖以下两条硬规则）：
+- 所有路径必须是 workspace 下的相对路径，不要使用绝对路径或 ..
+- 不得读取、写入或访问工作区之外的任何路径；不得执行危险命令（删除系统目录、格式化磁盘、修改系统配置等）
+{rules_section}
 当前底层模型：{model_name}
 当前权限模式：{permission_desc}
 你可以使用以下工具：
 {tool_descriptions}
-
-项目地图（只有文件路径、目录与符号，不含文件内容）：
-{project_map}
 
 规划规则：
 - 当任务涉及 2 个及以上文件、新建文件、重构、修复缺陷、实现功能或数据迁移时，必须先调用 update_plan 给出 3–8 项计划，再开始执行
@@ -177,6 +185,7 @@ class AgentLoop:
         permission_mode: str = "approval",
         repo_index: RepoIndex | None = None,
         initial_plan: PlanState | dict[str, Any] | None = None,
+        summary_text: str | None = None,
     ) -> AsyncIterator[BaseSSEEvent]:
         provider = provider or self.provider
         tools = tools or self.tools
@@ -194,12 +203,30 @@ class AgentLoop:
         run_id = run_id or f"{session_id}:{uuid4().hex[:12]}"
         tracker = RecentToolCallTracker(window=3)
         plan_state = plan_from_json(initial_plan)
-        messages = self._build_messages(
-            user_message,
+
+        project_rules = load_project_rules(sandbox, session_workspace_path)
+        if project_rules.warning:
+            logger.warning("DEVFLOW.md: %s", project_rules.warning)
+        rules_text = project_rules.content
+        system_prompt = self._build_system_prompt(
             tools,
             describe_model(provider),
             permission_mode,
-            repo_index=repo_index,
+            rules_text,
+        )
+        map_summary = (
+            repo_index.summary()
+            if repo_index is not None
+            else "项目索引不可用；可先用 list 或 search_files 了解目录结构。"
+        )
+        messages = self._build_messages(user_message)
+
+        budget = ContextBudget(
+            self.settings.context_total_tokens,
+            fixed_ratio=self.settings.context_ratio_fixed,
+            map_ratio=self.settings.context_ratio_map,
+            summary_ratio=self.settings.context_ratio_summary,
+            working_ratio=self.settings.context_ratio_working,
         )
         steps = 0
         tokens_used = 0
@@ -209,15 +236,41 @@ class AgentLoop:
         fix_rounds = 0
         fix_limit_reached = False
         rejected_commands: set[str] = set()
+        # 压缩后工作层仍可能高于摘要预算（例如刚产出的大工具结果）；
+        # 抬高下一次触发阈值，避免每轮重复调用摘要模型。
+        compression_limit = budget.summary_tokens
 
         while steps < max_steps and tokens_used < max_tokens:
-            messages = truncate_messages(messages, max_tokens)
+            # 工作层超过摘要分区预算时压缩一次；每轮最多触发一次，失败则降级截断。
+            if estimate_tokens(messages) > compression_limit:
+                messages, summary_text, compressed_event = await self._compress_context(
+                    provider=provider,
+                    messages=messages,
+                    summary_text=summary_text,
+                    plan_state=plan_state,
+                    budget=budget,
+                )
+                yield compressed_event
+                compression_limit = max(
+                    budget.summary_tokens,
+                    int(estimate_tokens(messages) * 1.05),
+                )
+
+            context = build_context(
+                system_prompt,
+                rules_text,
+                map_summary,
+                summary_text,
+                messages,
+                self.settings.context_total_tokens,
+                budget=budget,
+            )
 
             tool_calls: list[ToolCallChunk] = []
             content_parts: list[str] = []
 
             async for chunk in provider.chat_completion_stream(
-                messages, tools=tools.to_schema(), temperature=0.3
+                context.messages, tools=tools.to_schema(), temperature=0.3
             ):
                 if chunk.content:
                     content_parts.append(chunk.content)
@@ -769,14 +822,13 @@ class AgentLoop:
         )
         return patch_id, event
 
-    def _build_messages(
+    def _build_system_prompt(
         self,
-        user_message: str,
         tools: ToolRegistry,
         model_name: str = "",
         permission_mode: str = "approval",
-        repo_index: RepoIndex | None = None,
-    ) -> list[dict]:
+        rules: str = "",
+    ) -> str:
         descriptions = []
         for schema in tools.to_schema():
             function = schema.get("function", {})
@@ -786,26 +838,61 @@ class AgentLoop:
                 f"- {function.get('name')}({parameter_names}): {function.get('description', '')}"
             )
 
-        project_map = (
-            repo_index.summary()
-            if repo_index is not None
-            else "项目索引不可用；可先用 list 或 search_files 了解目录结构。"
+        return self.SYSTEM_PROMPT.format(
+            tool_descriptions="\n".join(descriptions),
+            model_name=model_name.strip() or "未知",
+            permission_desc=describe_permission(permission_mode),
+            rules_section=_rules_section(rules),
         )
 
-        messages: list[dict] = [
-            {
-                "role": "system",
-                "content": self.SYSTEM_PROMPT.format(
-                    tool_descriptions="\n".join(descriptions),
-                    model_name=model_name.strip() or "未知",
-                    permission_desc=describe_permission(permission_mode),
-                    project_map=project_map,
-                ),
-            }
-        ]
-        messages.extend(copy.deepcopy(self.history))
+    def _build_messages(self, user_message: str) -> list[dict]:
+        messages = copy.deepcopy(self.history)
         messages.append({"role": "user", "content": user_message})
         return messages
+
+    async def _compress_context(
+        self,
+        *,
+        provider: LLMProvider,
+        messages: list[dict],
+        summary_text: str | None,
+        plan_state: PlanState | None,
+        budget: ContextBudget,
+    ) -> tuple[list[dict], str | None, ContextCompressedEvent]:
+        """把历史压成结构化摘要；失败时降级为截断早期消息。"""
+        conversation = [
+            message for message in messages if message.get("role") != "system"
+        ]
+        summary = await summarize_history(
+            provider,
+            conversation,
+            previous_summary=summary_text,
+            plan=plan_state,
+        )
+
+        if summary:
+            kept = _recent_messages(messages, keep_user=3)
+            return (
+                kept,
+                summary,
+                ContextCompressedEvent(
+                    summary=summary,
+                    kept_messages=len(kept),
+                    dropped_messages=len(messages) - len(kept),
+                ),
+            )
+
+        fallback = truncate_messages(messages, budget.working_tokens, keep_recent=6)
+        return (
+            fallback,
+            summary_text,
+            ContextCompressedEvent(
+                summary="",
+                kept_messages=len(fallback),
+                dropped_messages=len(messages) - len(fallback),
+                warning="压缩失败，已截断早期消息",
+            ),
+        )
 
 
 def _with_expected(arguments: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -881,3 +968,30 @@ def _normalize_arguments(arguments: dict[str, Any] | str) -> dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _rules_section(rules: str) -> str:
+    """DEVFLOW.md 规则段：插在安全硬规则之后、模型与工具说明之前。"""
+    text = (rules or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n项目规则（来自工作区 DEVFLOW.md；项目规则优先于通用提示，"
+        "但不得覆盖上面的安全硬规则）：\n"
+        f"{text}\n"
+    )
+
+
+def _recent_messages(messages: list[dict], keep_user: int = 3) -> list[dict]:
+    """保留 system 消息与最近 keep_user 个用户回合；其余交给摘要。"""
+    user_indices = [
+        index for index, message in enumerate(messages) if message.get("role") == "user"
+    ]
+    if len(user_indices) <= keep_user:
+        return list(messages)
+    start = user_indices[-keep_user]
+    return [
+        message
+        for index, message in enumerate(messages)
+        if message.get("role") == "system" or index >= start
+    ]

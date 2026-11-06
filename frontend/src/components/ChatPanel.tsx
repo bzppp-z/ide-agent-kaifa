@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 
-import type { ChatItem } from "../stores/useChatStore";
+import type { ChatContextItem, ChatItem } from "../stores/useChatStore";
 import { useChatStore } from "../stores/useChatStore";
 import { useSessionStore } from "../stores/useSessionStore";
 import { ChangeSetCard } from "./ChangeSetCard";
@@ -12,6 +12,40 @@ import { SseMessage } from "./SseMessage";
 import { ToolCard } from "./ToolCard";
 import { Button } from "./ui/button";
 import { SendIcon } from "./ui/icons";
+
+function ContextNotice({ item }: { item: ChatContextItem }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasSummary = item.summary.trim().length > 0;
+  const label = hasSummary
+    ? "已压缩早期上下文（保留目标与未完成项）"
+    : item.warning ?? "压缩失败，已截断早期消息";
+
+  return (
+    <div className="rounded border border-surface-border bg-surface-alt px-2.5 py-1.5">
+      <button
+        type="button"
+        onClick={() => hasSummary && setExpanded((value) => !value)}
+        disabled={!hasSummary}
+        className={`flex w-full items-center gap-1.5 text-left text-[10.5px] ${
+          hasSummary ? "text-muted-dim" : "text-yellow-400/90"
+        }`}
+      >
+        <span className="font-mono">context</span>
+        <span>{label}</span>
+        {hasSummary ? (
+          <span className="ml-auto text-muted-dim">
+            {expanded ? "收起" : "展开"}
+          </span>
+        ) : null}
+      </button>
+      {expanded && hasSummary ? (
+        <div className="mt-1.5 whitespace-pre-wrap break-words border-t border-surface-border pt-1.5 text-[11px] leading-relaxed text-muted">
+          {item.summary}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function ChatEventView({
   item,
@@ -53,6 +87,9 @@ function ChatEventView({
 
     case "command":
       return <CommandCard item={item} />;
+
+    case "context":
+      return <ContextNotice item={item} />;
 
     case "output":
       return (

@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     max_steps_per_run: int = 25
     max_tokens_per_run: int = 200000
 
+    # 上下文分层预算：固定 / 项目地图 / 历史摘要 / 工作区
+    context_total_tokens: int = 200000
+    context_ratio_fixed: float = 0.10
+    context_ratio_map: float = 0.10
+    context_ratio_summary: float = 0.20
+    context_ratio_working: float = 0.60
+
     # 命令执行：默认/最大超时、单次 run 命令数上限、验证失败自动修复轮数
     command_timeout_default: int = 30
     command_timeout_max: int = 120

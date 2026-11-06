@@ -108,7 +108,8 @@
 **File:** [phase-5-context-management.md](phase-5-context-management.md)
 **Goal:** 分层 token 预算、结构化历史摘要、`DEVFLOW.md` 项目规则注入与压缩提示。
 **Tasks:** 3
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ### Phase 6: 前端体验与端到端验收
 **File:** [phase-6-editor-and-e2e.md](phase-6-editor-and-e2e.md)

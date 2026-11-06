@@ -112,6 +112,16 @@ export interface ChatDoneItem {
   stopped?: boolean;
 }
 
+/** 上下文压缩提示条：summary 为空表示压缩失败、已降级截断。 */
+export interface ChatContextItem {
+  id: string;
+  kind: "context";
+  summary: string;
+  warning: string | null;
+  keptMessages: number;
+  droppedMessages: number;
+}
+
 export type ChatItem =
   | ChatUserItem
   | ChatAssistantItem
@@ -121,7 +131,8 @@ export type ChatItem =
   | ChatCommandItem
   | ChatOutputItem
   | ChatErrorItem
-  | ChatDoneItem;
+  | ChatDoneItem
+  | ChatContextItem;
 
 // --------------------------------------------------------------------- store
 
@@ -457,6 +468,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
               chunk: event.chunk,
             });
           }
+          return { items };
+        }
+
+        case "context.compressed": {
+          items.push({
+            id: nextId("context"),
+            kind: "context",
+            summary: event.summary ?? "",
+            warning: event.warning ?? null,
+            keptMessages: event.kept_messages ?? 0,
+            droppedMessages: event.dropped_messages ?? 0,
+          });
           return { items };
         }
 

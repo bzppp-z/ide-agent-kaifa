@@ -6,6 +6,8 @@
 
 import asyncio
 import logging
+import re
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
@@ -21,6 +23,57 @@ from app.services.sandbox import SandboxService
 logger = logging.getLogger(__name__)
 
 INIT_MARKER = ".devflow-initialized"
+PROJECT_RULES_FILE = "DEVFLOW.md"
+PROJECT_RULES_MAX_LINES = 2000
+
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]+"), r"\1***"),
+    (re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)[^\s\"'`]+"), r"\1***"),
+    (re.compile(r"sk-[A-Za-z0-9_-]+"), "sk-***"),
+)
+
+
+@dataclass(frozen=True)
+class ProjectRules:
+    """工作区根 DEVFLOW.md 的注入内容与提示。"""
+
+    content: str = ""
+    warning: str | None = None
+
+
+def redact_secrets(text: str) -> str:
+    """对注入内容打码：sk-...、api_key=...、Bearer ...。不修改磁盘文件。"""
+    if not text:
+        return ""
+    result = text
+    for pattern, replacement in _SECRET_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+def load_project_rules(sandbox: SandboxService, workspace_path: str) -> ProjectRules:
+    """读取工作区根 DEVFLOW.md；缺失/读取失败不影响 run。"""
+    try:
+        raw = sandbox.read_file(workspace_path, PROJECT_RULES_FILE)
+    except FileNotFoundError:
+        return ProjectRules()
+    except UnicodeDecodeError:
+        return ProjectRules(warning="DEVFLOW.md 编码无法解析，已忽略")
+    except Exception as exc:  # 读取失败不应中断主流程
+        logger.warning("failed to read DEVFLOW.md: %s", exc)
+        return ProjectRules(warning="DEVFLOW.md 读取失败，已忽略")
+
+    lines = raw.splitlines()
+    warning = None
+    if len(lines) > PROJECT_RULES_MAX_LINES:
+        lines = lines[:PROJECT_RULES_MAX_LINES]
+        warning = (
+            f"DEVFLOW.md 超过 {PROJECT_RULES_MAX_LINES} 行，"
+            f"只注入前 {PROJECT_RULES_MAX_LINES} 行"
+        )
+
+    content = redact_secrets("\n".join(lines)).strip()
+    return ProjectRules(content=content, warning=warning)
 
 
 class WorkspaceService:

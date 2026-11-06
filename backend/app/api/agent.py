@@ -30,6 +30,7 @@ from app.api.sessions import (
 )
 from app.core.events import (
     CommandProposedEvent,
+    ContextCompressedEvent,
     DoneEvent,
     ErrorEvent,
     MessageDeltaEvent,
@@ -118,6 +119,7 @@ async def run_agent(
             permission_mode=session_row.permission_mode or "approval",
             initial_plan=_parse_plan(session_row),
             checkpoint_id=checkpoint["id"],
+            summary_text=session_row.summary_text,
         ),
         name=f"devflow-agent-{session_id}",
     )
@@ -305,6 +307,7 @@ async def _drive_agent_loop(
     permission_mode: str = "approval",
     initial_plan: dict | None = None,
     checkpoint_id: str | None = None,
+    summary_text: str | None = None,
 ) -> None:
     """后台跑 AgentLoop，把每个事件放进 queue；结束时放哨兵 None。"""
     try:
@@ -333,6 +336,7 @@ async def _drive_agent_loop(
             permission_mode=permission_mode,
             repo_index=app.state.repo_indexes.get(session_id),
             initial_plan=initial_plan,
+            summary_text=summary_text,
         ):
             queue.put_nowait(event)
     except asyncio.CancelledError:
@@ -492,6 +496,16 @@ async def _persist_event(
                 )
             )
             await db.commit()
+            return
+
+        if isinstance(event, ContextCompressedEvent):
+            # 只有成功摘要才覆盖已有 summary_text；失败降级不抹掉旧摘要。
+            if event.summary:
+                row = await db.get(SessionModel, session_id)
+                if row is not None:
+                    row.summary_text = event.summary
+                    row.last_active_at = utcnow()
+                    await db.commit()
             return
 
         if isinstance(event, DoneEvent):
