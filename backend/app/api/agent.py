@@ -56,7 +56,7 @@ async def run_agent(
     db: AsyncSession = Depends(get_db_session),
 ) -> AgentRunResponse:
     ensure_session_ownership(session_id, current_session)
-    await load_session_or_404(db, session_id)
+    session_row = await load_session_or_404(db, session_id)
 
     workspace = request.app.state.workspace
     workspace_path = await workspace.ensure_container(session_id)
@@ -95,6 +95,7 @@ async def run_agent(
             workspace_path=workspace_path,
             history=history,
             provider=provider,
+            permission_mode=session_row.permission_mode or "approval",
         ),
         name=f"devflow-agent-{session_id}",
     )
@@ -135,6 +136,42 @@ async def stream_agent(
     )
 
 
+@router.post("/sessions/{session_id}/stop")
+async def stop_run(
+    session_id: str,
+    request: Request,
+    current_session: str = Depends(get_current_session),
+) -> dict:
+    """停止当前 run：先投递 done（stopped=true），再取消后台 task。"""
+    ensure_session_ownership(session_id, current_session)
+
+    loop_states: dict[str, dict] = request.app.state.loop_states
+    state = loop_states.get(session_id)
+    if state is None:
+        return {"ok": True, "already_stopped": True}
+
+    queue: asyncio.Queue = state["queue"]
+    queue.put_nowait(
+        DoneEvent(
+            run_id=state.get("run_id"),
+            warning="stopped by user",
+            stopped=True,
+        )
+    )
+    queue.put_nowait(None)
+
+    task = state.get("task")
+    if task is not None and not task.done():
+        task.cancel()
+
+    registry = getattr(request.app.state, "pending_patches", None)
+    if registry is not None:
+        registry.discard_all(session_id)
+        state["task"] = None
+
+    return {"ok": True, "stopped": True}
+
+
 @router.patch("/agent/patch/{patch_id}")
 async def respond_patch(
     patch_id: str,
@@ -172,6 +209,7 @@ async def _drive_agent_loop(
     workspace_path: str,
     history: list[dict],
     provider: LLMProvider | None = None,
+    permission_mode: str = "approval",
 ) -> None:
     """后台跑 AgentLoop，把每个事件放进 queue；结束时放哨兵 None。"""
     try:
@@ -190,6 +228,7 @@ async def _drive_agent_loop(
             max_steps=settings.max_steps_per_run,
             max_tokens=settings.max_tokens_per_run,
             run_id=run_id,
+            permission_mode=permission_mode,
         ):
             queue.put_nowait(event)
     except asyncio.CancelledError:

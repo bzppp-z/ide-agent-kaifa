@@ -5,9 +5,11 @@ import type {
   FileWriteResult,
   LocalBrowseResponse,
   PatchDecisionResult,
+  PermissionMode,
   Provider,
   ProviderTestResult,
   RunCreated,
+  Session,
   SessionCreated,
   SessionDetail,
   SSEEvent,
@@ -123,6 +125,23 @@ export function runAgent(sessionId: string, message: string): Promise<RunCreated
   return apiFetch<RunCreated>(`/sessions/${sessionId}/run`, {
     method: "POST",
     body: JSON.stringify({ message }),
+  });
+}
+
+/** 停止当前 run：后端投递 done(stopped=true) 后取消后台任务。 */
+export function stopRun(
+  sessionId: string,
+): Promise<{ ok: boolean; stopped?: boolean; already_stopped?: boolean }> {
+  return apiFetch(`/sessions/${sessionId}/stop`, { method: "POST" });
+}
+
+export function setPermissionMode(
+  sessionId: string,
+  mode: PermissionMode,
+): Promise<Session> {
+  return apiFetch<Session>(`/sessions/${sessionId}/preferences`, {
+    method: "PATCH",
+    body: JSON.stringify({ permission_mode: mode }),
   });
 }
 

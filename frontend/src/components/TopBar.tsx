@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import type { PermissionMode } from "../lib/types";
 import { useProviderStore } from "../stores/useProviderStore";
 import { useSessionStore } from "../stores/useSessionStore";
 import { ModelSettingsDialog } from "./ModelSettingsDialog";
@@ -11,6 +12,8 @@ import { Spinner } from "./ui/spinner";
 
 export function TopBar({ onRetry }: { onRetry: () => void }) {
   const creating = useSessionStore((state) => state.creating);
+  const permissionMode = useSessionStore((state) => state.permissionMode);
+  const setPermissionMode = useSessionStore((state) => state.setPermissionMode);
   const providers = useProviderStore((state) => state.providers);
   const loadProviders = useProviderStore((state) => state.load);
 
@@ -46,6 +49,21 @@ export function TopBar({ onRetry }: { onRetry: () => void }) {
           <SettingsIcon className="h-3 w-3 shrink-0" />
           <span className="truncate">{activeName}</span>
         </Button>
+
+        <label className="flex items-center gap-1.5" title="权限模式：控制 agent 能否改文件/执行命令">
+          <span className="text-[10.5px] text-muted-dim">权限</span>
+          <select
+            value={permissionMode}
+            onChange={(event) =>
+              void setPermissionMode(event.target.value as PermissionMode)
+            }
+            className="h-7 rounded border border-surface-border bg-surface-alt px-1.5 text-[11px] text-text outline-none transition-colors hover:border-[#2E343A] focus:border-brand/50"
+          >
+            <option value="readonly">只读</option>
+            <option value="approval">需审批</option>
+            <option value="auto">自动接受</option>
+          </select>
+        </label>
 
         <SandboxStatus onRetry={onRetry} />
 

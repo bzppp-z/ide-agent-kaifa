@@ -75,6 +75,50 @@ class ErrorEvent(BaseSSEEvent):
     code: str | None = None
 
 
+class PlanUpdateEvent(BaseSSEEvent):
+    """agent 更新任务计划（整份快照）。"""
+
+    type: Literal["plan.update"] = "plan.update"
+    plan: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChangeSetProposedEvent(BaseSSEEvent):
+    """一次工具调用产生的 1..N 个文件变更，等待用户审批。"""
+
+    type: Literal["change_set.proposed"] = "change_set.proposed"
+    change_set_id: str
+    files: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CommandProposedEvent(BaseSSEEvent):
+    """agent 请求执行命令，等待用户审批。"""
+
+    type: Literal["command.proposed"] = "command.proposed"
+    command_id: str
+    command: str
+    cwd: str = ""
+    timeout_seconds: int = 30
+    reason: str = ""
+
+
+class ContextCompressedEvent(BaseSSEEvent):
+    """历史对话被压缩为结构化摘要。"""
+
+    type: Literal["context.compressed"] = "context.compressed"
+    summary: str = ""
+    kept_messages: int = 0
+    dropped_messages: int = 0
+    warning: str | None = None
+
+
+class FileChangedEvent(BaseSSEEvent):
+    """agent 写入/删除/回滚后通知前端刷新已打开的文件。"""
+
+    type: Literal["file.changed"] = "file.changed"
+    path: str
+    operation: Literal["write", "delete", "rollback"] = "write"
+
+
 class DoneEvent(BaseSSEEvent):
     """一次 run 结束。"""
 
@@ -83,6 +127,7 @@ class DoneEvent(BaseSSEEvent):
     warning: str | None = None
     total_tokens: int = 0
     total_steps: int = 0
+    stopped: bool = False
 
 
 SSEEvent = Annotated[
@@ -94,6 +139,11 @@ SSEEvent = Annotated[
         RunOutputEvent,
         ErrorEvent,
         DoneEvent,
+        PlanUpdateEvent,
+        ChangeSetProposedEvent,
+        CommandProposedEvent,
+        ContextCompressedEvent,
+        FileChangedEvent,
     ],
     Field(discriminator="type"),
 ]

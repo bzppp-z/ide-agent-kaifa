@@ -1,6 +1,7 @@
 """会话相关请求/响应 schema。"""
 
 from datetime import datetime
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -20,6 +21,12 @@ class SessionResponse(BaseModel):
     demo_repo: str
     container_ready: bool
     created_at: datetime
+    permission_mode: Literal["readonly", "approval", "auto"] = "approval"
+    plan: dict[str, Any] | None = None
+
+
+class SessionPreferencesUpdate(BaseModel):
+    permission_mode: Literal["readonly", "approval", "auto"]
 
 
 class SessionCreatedResponse(SessionResponse):

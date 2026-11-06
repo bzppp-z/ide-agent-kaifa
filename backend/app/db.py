@@ -53,15 +53,25 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         if conn.dialect.name == "sqlite":
-            await _migrate_sqlite_sessions(conn)
+            await _migrate_sqlite(conn)
 
 
-async def _migrate_sqlite_sessions(conn: AsyncConnection) -> None:
-    """给旧的 sessions 表补 ``local_path`` 列（幂等）。"""
-    rows = (await conn.exec_driver_sql("PRAGMA table_info(sessions)")).fetchall()
-    columns = {row[1] for row in rows}
-    if "local_path" not in columns:
-        await conn.exec_driver_sql("ALTER TABLE sessions ADD COLUMN local_path VARCHAR")
+async def _migrate_sqlite(conn: AsyncConnection) -> None:
+    """给旧库补新列（幂等）。SQLite 不支持 ADD COLUMN IF NOT EXISTS。"""
+
+    async def add_missing(
+        table: str, column: str, ddl: str
+    ) -> None:
+        rows = (await conn.exec_driver_sql(f"PRAGMA table_info({table})")).fetchall()
+        columns = {row[1] for row in rows}
+        if column not in columns:
+            await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+    await add_missing("sessions", "local_path", "local_path VARCHAR")
+    await add_missing("sessions", "permission_mode", "permission_mode VARCHAR DEFAULT 'approval'")
+    await add_missing("sessions", "plan_json", "plan_json TEXT")
+    await add_missing("sessions", "summary_text", "summary_text TEXT")
+    await add_missing("messages", "reverted", "reverted BOOLEAN DEFAULT 0")
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:

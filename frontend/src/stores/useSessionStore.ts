@@ -4,8 +4,10 @@ import {
   createSession as createSessionRequest,
   formatError,
   getSession,
+  setPermissionMode as setPermissionModeRequest,
   type CreateSessionOptions,
 } from "../lib/api";
+import type { PermissionMode } from "../lib/types";
 import { useChatStore } from "./useChatStore";
 import { useEditorStore } from "./useEditorStore";
 import { useWorkspaceStore } from "./useWorkspaceStore";
@@ -51,8 +53,11 @@ interface SessionState {
   /** 当前本地目录会话的根路径；demo 会话为 null。 */
   localPath: string | null;
   containerStatus: ContainerStatus;
+  /** 当前会话权限模式；服务端为准，前端切换后以返回值覆盖。 */
+  permissionMode: PermissionMode;
   creating: boolean;
   error: string | null;
+  setPermissionMode: (mode: PermissionMode) => Promise<void>;
   createSession: (options?: CreateSessionOptions) => Promise<boolean>;
   /** 用已有 id + token 恢复会话：拉历史消息 + 重建文件树。 */
   restoreSession: (id: string, token: string) => Promise<boolean>;
@@ -71,6 +76,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   demoRepo: "todo-app",
   localPath: null,
   containerStatus: "yellow",
+  permissionMode: "approval",
   creating: false,
   error: null,
 
@@ -104,6 +110,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         token: created.token,
         demoRepo: created.demo_repo,
         localPath: created.local_path ?? localPath,
+        permissionMode: created.permission_mode ?? "approval",
         creating: false,
       });
       persistSession(created.id, created.token);
@@ -129,6 +136,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       set({
         demoRepo: detail.demo_repo,
         localPath: detail.local_path ?? null,
+        permissionMode: detail.permission_mode ?? "approval",
         creating: false,
         containerStatus: detail.container_ready ? "green" : "yellow",
       });
@@ -159,6 +167,22 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     return get().createSession();
   },
 
+  setPermissionMode: async (mode) => {
+    const sessionId = get().id;
+    if (!sessionId) {
+      set({ permissionMode: mode });
+      return;
+    }
+    const previous = get().permissionMode;
+    set({ permissionMode: mode });
+    try {
+      const updated = await setPermissionModeRequest(sessionId, mode);
+      set({ permissionMode: updated.permission_mode ?? mode });
+    } catch (error) {
+      set({ permissionMode: previous, error: formatError(error) });
+    }
+  },
+
   refreshSandbox: async () => {
     const sessionId = get().id;
     if (!sessionId) return;
@@ -178,6 +202,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       token: null,
       localPath: null,
       containerStatus: "yellow",
+      permissionMode: "approval",
       creating: false,
       error: null,
     });

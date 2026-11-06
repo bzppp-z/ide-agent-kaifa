@@ -30,6 +30,7 @@ from app.services.agent.mock_provider import MockProvider
 from app.services.agent.pending import PendingPatchRegistry
 from app.services.agent.provider import LLMProvider, ToolCallChunk
 from app.services.agent.tools import ToolRegistry, ToolResult
+from app.services.permissions import normalize_permission_mode
 from app.services.sandbox import SandboxService
 
 MAX_STEPS_DEFAULT = 25
@@ -63,6 +64,16 @@ class RecentToolCallTracker:
         return len(self._digests) == self.window and len(set(self._digests)) == 1
 
 
+def describe_permission(mode: str | None) -> str:
+    """把权限模式写成模型可执行的行为约束。"""
+    normalized = normalize_permission_mode(mode)
+    if normalized == "readonly":
+        return "只读（禁止新建、写入、删除文件和执行命令；只能读取、检索、规划）"
+    if normalized == "auto":
+        return "自动接受（编辑类操作可直接生效；删除文件与执行命令仍需用户确认）"
+    return "需审批（每次写入、删除和命令执行都需要用户确认）"
+
+
 def describe_model(provider: LLMProvider | None) -> str:
     """返回当前底层模型的展示名，用于注入系统提示词。
 
@@ -83,11 +94,13 @@ def describe_model(provider: LLMProvider | None) -> str:
 class AgentLoop:
     SYSTEM_PROMPT = """你是 DevFlow 的 AI coding agent。工作目录是一个隔离的 workspace。
 当前底层模型：{model_name}
+当前权限模式：{permission_desc}
 你可以使用以下工具：
 {tool_descriptions}
 
 规则：
 - 所有路径必须是 workspace 下的相对路径，不要使用绝对路径或 ..
+- 严格遵守当前权限模式：只读模式下不要尝试写入或执行命令，也不要反复重试被拒绝的调用
 - 一次工具调用只处理一个文件的修改
 - 如果需要修改多个文件，依次调用工具
 - 使用中文回复用户
@@ -119,6 +132,7 @@ class AgentLoop:
         max_tokens: int = MAX_TOKENS_DEFAULT,
         run_id: str | None = None,
         patch_approval_timeout: float = PATCH_APPROVAL_TIMEOUT_SECONDS,
+        permission_mode: str = "approval",
     ) -> AsyncIterator[BaseSSEEvent]:
         provider = provider or self.provider
         tools = tools or self.tools
@@ -135,7 +149,9 @@ class AgentLoop:
 
         run_id = run_id or f"{session_id}:{uuid4().hex[:12]}"
         tracker = RecentToolCallTracker(window=3)
-        messages = self._build_messages(user_message, tools, describe_model(provider))
+        messages = self._build_messages(
+            user_message, tools, describe_model(provider), permission_mode
+        )
         steps = 0
         tokens_used = 0
 
@@ -198,6 +214,7 @@ class AgentLoop:
                         sandbox,
                         session_workspace_path,
                         dry_run=True,
+                        permission_mode=permission_mode,
                     )
                     if preview.ok and preview.extra:
                         patch_id, proposed = self._prepare_patch(
@@ -215,7 +232,11 @@ class AgentLoop:
 
                         if accepted:
                             result = await tools.call(
-                                "write_patch", arguments, sandbox, session_workspace_path
+                                "write_patch",
+                                arguments,
+                                sandbox,
+                                session_workspace_path,
+                                permission_mode=permission_mode,
                             )
                         else:
                             preview.duration_ms = int(
@@ -235,7 +256,11 @@ class AgentLoop:
                         result = preview
                 else:
                     result = await tools.call(
-                        tool_name, arguments, sandbox, session_workspace_path
+                        tool_name,
+                        arguments,
+                        sandbox,
+                        session_workspace_path,
+                        permission_mode=permission_mode,
                     )
 
                 tracker.record(tool_name, arguments)
@@ -320,7 +345,11 @@ class AgentLoop:
         return patch_id, event
 
     def _build_messages(
-        self, user_message: str, tools: ToolRegistry, model_name: str = ""
+        self,
+        user_message: str,
+        tools: ToolRegistry,
+        model_name: str = "",
+        permission_mode: str = "approval",
     ) -> list[dict]:
         descriptions = []
         for schema in tools.to_schema():
@@ -337,6 +366,7 @@ class AgentLoop:
                 "content": self.SYSTEM_PROMPT.format(
                     tool_descriptions="\n".join(descriptions),
                     model_name=model_name.strip() or "未知",
+                    permission_desc=describe_permission(permission_mode),
                 ),
             }
         ]

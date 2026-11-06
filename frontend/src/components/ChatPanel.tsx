@@ -70,7 +70,8 @@ function ChatEventView({
           <div className="flex items-center gap-2 text-[10.5px] text-muted-dim">
             <span className="h-px flex-1 bg-surface-border" />
             <span className="font-mono">
-              完成 · {item.totalSteps} 步 · {item.totalTokens} tokens
+              {item.stopped ? "已停止" : "完成"} · {item.totalSteps} 步 ·{" "}
+              {item.totalTokens} tokens
             </span>
             <span className="h-px flex-1 bg-surface-border" />
           </div>
@@ -192,7 +193,7 @@ export function ChatPanel() {
                 <Button
                   variant="danger"
                   size="sm"
-                  onClick={stopStreaming}
+                  onClick={() => void stopStreaming(sessionId ?? "")}
                   title="停止当前运行"
                 >
                   <span className="h-2 w-2 rounded-[1px] bg-current" />

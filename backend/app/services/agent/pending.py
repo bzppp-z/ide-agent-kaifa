@@ -83,3 +83,10 @@ class PendingPatchRegistry:
 
     def discard(self, patch_id: str) -> None:
         self._patches.pop(patch_id, None)
+
+    def discard_all(self, session_id: str) -> None:
+        """停止 run 时让该会话所有待审批条目以“拒绝”返回。"""
+        for pending in self._patches.values():
+            if pending.session_id == session_id:
+                pending.decision = False
+                pending.event.set()

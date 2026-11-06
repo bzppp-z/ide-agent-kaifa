@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { formatError, runAgent } from "../lib/api";
+import { formatError, runAgent, stopRun } from "../lib/api";
 import type { Message, SSEEvent } from "../lib/types";
 
 // ------------------------------------------------------------------ chat items
@@ -63,6 +63,7 @@ export interface ChatDoneItem {
   warning: string | null;
   totalTokens: number;
   totalSteps: number;
+  stopped?: boolean;
 }
 
 export type ChatItem =
@@ -97,8 +98,8 @@ interface ChatState {
   setSseAbort: (controller: AbortController | null) => void;
   /** 标记某个 patch 卡片的处理结果（PatchDiff 在决议成功后调用）。 */
   setPatchStatus: (patchId: string, status: "accepted" | "rejected") => void;
-  /** 主动停止：断开 SSE 并把在写消息收尾。 */
-  stopStreaming: () => void;
+  /** 主动停止：先通知后端取消 run，再断开 SSE 并把在写消息收尾。 */
+  stopStreaming: (sessionId: string) => Promise<void>;
   endStream: () => void;
   clear: () => void;
 }
@@ -287,6 +288,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             warning: event.warning ?? null,
             totalTokens: event.total_tokens ?? 0,
             totalSteps: event.total_steps ?? 0,
+            stopped: event.stopped ?? false,
           });
           return {
             items: finalized,
@@ -346,16 +348,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     })),
 
-  stopStreaming: () => {
+  stopStreaming: async (sessionId) => {
+    try {
+      await stopRun(sessionId);
+    } catch {
+      // 后端可能已经结束；本地仍按用户意愿收尾
+    }
     get().sseAbort?.abort();
-    set((state) => ({
-      streaming: false,
-      runId: null,
-      sseAbort: null,
-      items: state.items.map((item) =>
+    set((state) => {
+      const items = state.items.map((item) =>
         item.kind === "assistant" ? { ...item, streaming: false } : item,
-      ),
-    }));
+      );
+      const last = items[items.length - 1];
+      if (!last || last.kind !== "done") {
+        items.push({
+          id: nextId("done"),
+          kind: "done",
+          warning: "已停止",
+          totalTokens: 0,
+          totalSteps: 0,
+          stopped: true,
+        });
+      }
+      return { items, streaming: false, runId: null, sseAbort: null };
+    });
   },
 
   endStream: () =>

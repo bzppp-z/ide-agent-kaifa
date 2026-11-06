@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from app.core.security import validate_workspace_path
+from app.services.permissions import can_write, normalize_permission_mode
 from app.services.sandbox import SandboxService
 
 MAX_READ_LINES = 2000
@@ -112,6 +113,7 @@ class ToolRegistry:
         sandbox: SandboxService,
         workspace_path: str,
         dry_run: bool = False,
+        permission_mode: str = "approval",
     ) -> ToolResult:
         if not isinstance(args, dict):
             args = {}
@@ -124,7 +126,9 @@ class ToolRegistry:
         elif name == "search":
             result = self._search(args, sandbox, workspace_path)
         elif name == "write_patch":
-            result = self._write_patch(args, sandbox, workspace_path, dry_run=dry_run)
+            result = self._write_patch(
+                args, sandbox, workspace_path, dry_run=dry_run, permission_mode=permission_mode
+            )
         else:
             result = ToolResult(ok=False, summary=f"unknown tool: {name}")
 
@@ -265,7 +269,15 @@ class ToolRegistry:
         sandbox: SandboxService,
         workspace_path: str,
         dry_run: bool = False,
+        permission_mode: str = "approval",
     ) -> ToolResult:
+        if not can_write(permission_mode):
+            return ToolResult(
+                ok=False,
+                summary="当前为只读模式，禁止写入",
+                details=f"permission_mode={normalize_permission_mode(permission_mode)}",
+            )
+
         raw_path = _require_str_arg(args, "path")
         search = _require_str_arg(args, "search")
         replace = _require_str_arg(args, "replace")

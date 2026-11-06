@@ -5,6 +5,7 @@
 - DELETE /sessions/{id}：清理 workspace 并清空 container_id（会话与消息保留）。
 """
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,8 +19,13 @@ from app.db import get_db_session, utcnow
 from app.models.message import Message as MessageModel
 from app.models.session import Session as SessionModel
 from app.schemas.message import MessageResponse
-from app.schemas.session import SessionCreatedResponse, SessionDetailResponse, SessionResponse
-from app.schemas.session import SessionCreate
+from app.schemas.session import (
+    SessionCreate,
+    SessionCreatedResponse,
+    SessionDetailResponse,
+    SessionPreferencesUpdate,
+    SessionResponse,
+)
 from app.services.auth import create_session_token
 from app.services.demo_repos import get_demo_repo
 
@@ -35,12 +41,25 @@ def ensure_session_ownership(session_id: str, current_session: str) -> None:
         )
 
 
+def _parse_plan(row: SessionModel) -> dict | None:
+    """plan_json 解析失败时返回 None，不让脏数据阻塞会话恢复。"""
+    if not row.plan_json:
+        return None
+    try:
+        parsed = json.loads(row.plan_json)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def session_to_response(row: SessionModel) -> SessionResponse:
     return SessionResponse(
         id=row.id,
         demo_repo=row.demo_repo,
         container_ready=row.container_id is not None,
         created_at=row.created_at,
+        permission_mode=row.permission_mode or "approval",  # type: ignore[arg-type]
+        plan=_parse_plan(row),
     )
 
 
@@ -88,6 +107,7 @@ async def create_session(
         demo_repo=row.demo_repo,
         container_ready=False,
         created_at=row.created_at,
+        permission_mode=row.permission_mode,  # type: ignore[arg-type]
         token=token,
     )
 
@@ -129,10 +149,29 @@ async def get_session(
                 role=message.role,
                 content=message.content,
                 created_at=message.created_at,
+                reverted=bool(message.reverted),
             )
             for message in messages
         ],
     )
+
+
+@router.patch("/{session_id}/preferences", response_model=SessionResponse)
+async def update_session_preferences(
+    session_id: str,
+    body: SessionPreferencesUpdate,
+    request: Request,
+    current_session: str = Depends(get_current_session),
+    db: AsyncSession = Depends(get_db_session),
+) -> SessionResponse:
+    """更新会话级偏好（当前仅权限模式）。"""
+    ensure_session_ownership(session_id, current_session)
+    row = await load_session_or_404(db, session_id)
+    row.permission_mode = body.permission_mode
+    row.last_active_at = utcnow()
+    await db.commit()
+    await db.refresh(row)
+    return session_to_response(row)
 
 
 @router.delete("/{session_id}")
