@@ -28,13 +28,13 @@ Copy-Item backend\.env.example backend\.env
 ## 启动
 
 ```powershell
-C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe -m uvicorn app.main:app --port 8000
+C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe -m uvicorn app.main:app --port 8010
 ```
 
 在 `backend` 目录下运行。健康检查：
 
 ```powershell
-Invoke-RestMethod http://localhost:8000/health
+Invoke-RestMethod http://localhost:8010/health
 # ok db     sandbox
 # -- --     -------
 # True True True

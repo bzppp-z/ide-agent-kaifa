@@ -31,6 +31,8 @@ function Wait-Listening([int]$port, [int]$seconds) {
 }
 
 $python = "C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe"
+$backendPort = 8010
+$frontendPort = 5173
 if (-not (Test-Path $python)) {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd) { $python = $cmd.Source }
@@ -47,20 +49,20 @@ if (-not (Test-Path (Join-Path $root "frontend\node_modules"))) {
     Pop-Location
 }
 
-if (Test-Listening 8000) {
-    Write-Host "[DevFlow] Backend already running on :8000" -ForegroundColor Yellow
+if (Test-Listening $backendPort) {
+    Write-Host "[DevFlow] Backend already running on :$backendPort" -ForegroundColor Yellow
 } else {
     Write-Host "[DevFlow] Starting backend ..." -ForegroundColor Cyan
     Start-Process -FilePath $python `
-        -ArgumentList "-m", "uvicorn", "app.main:app", "--port", "8000" `
+        -ArgumentList "-m", "uvicorn", "app.main:app", "--port", "$backendPort" `
         -WorkingDirectory (Join-Path $root "backend") `
         -RedirectStandardOutput (Join-Path $logDir "backend.log") `
         -RedirectStandardError (Join-Path $logDir "backend.err.log") `
         -WindowStyle Hidden
 }
 
-if (Test-Listening 5173) {
-    Write-Host "[DevFlow] Frontend already running on :5173" -ForegroundColor Yellow
+if (Test-Listening $frontendPort) {
+    Write-Host "[DevFlow] Frontend already running on :$frontendPort" -ForegroundColor Yellow
 } else {
     Write-Host "[DevFlow] Starting frontend ..." -ForegroundColor Cyan
     Start-Process -FilePath "cmd.exe" `
@@ -71,25 +73,25 @@ if (Test-Listening 5173) {
         -WindowStyle Hidden
 }
 
-$backendOk = Wait-Listening 8000 45
-$frontendOk = Wait-Listening 5173 120
+$backendOk = Wait-Listening $backendPort 45
+$frontendOk = Wait-Listening $frontendPort 120
 
 if ($backendOk) {
-    Write-Host "[DevFlow] Backend ready  -> http://localhost:8000/health" -ForegroundColor Green
+    Write-Host "[DevFlow] Backend ready  -> http://localhost:$backendPort/health" -ForegroundColor Green
 } else {
-    Write-Host "[DevFlow] Backend NOT ready on :8000" -ForegroundColor Red
+    Write-Host "[DevFlow] Backend NOT ready on :$backendPort" -ForegroundColor Red
     Write-Host "          Log: $(Join-Path $logDir 'backend.err.log')" -ForegroundColor DarkGray
 }
 if ($frontendOk) {
-    Write-Host "[DevFlow] Frontend ready -> http://localhost:5173" -ForegroundColor Green
+    Write-Host "[DevFlow] Frontend ready -> http://localhost:$frontendPort" -ForegroundColor Green
 } else {
-    Write-Host "[DevFlow] Frontend NOT ready on :5173" -ForegroundColor Red
+    Write-Host "[DevFlow] Frontend NOT ready on :$frontendPort" -ForegroundColor Red
     Write-Host "          Log: $(Join-Path $logDir 'frontend.err.log')" -ForegroundColor DarkGray
 }
 Write-Host "[DevFlow] Logs: $logDir" -ForegroundColor DarkGray
 
 if ($backendOk -and $frontendOk -and -not $NoBrowser) {
-    Start-Process "http://localhost:5173"
+    Start-Process "http://localhost:$frontendPort"
     Write-Host "[DevFlow] Browser opened. Double-click stop-devflow.bat to shut down." -ForegroundColor Cyan
 }
 

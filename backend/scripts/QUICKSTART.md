@@ -6,16 +6,16 @@
 ## 1. 启动
 
 **一键启动（推荐）**：双击项目根目录的 `start-devflow.bat`，等待出现 Backend ready / Frontend ready 后浏览器会自动打开。
-停止：双击 `stop-devflow.bat`（会释放 8000 / 5173 端口）。
+停止：双击 `stop-devflow.bat`（会释放 8010 / 5173 端口）。
 进程日志：`%LOCALAPPDATA%\DevFlow\logs`。
 
 **手动启动（两个终端）**：
 
-终端 A（后端，端口 8000）：
+终端 A（后端，端口 8010）：
 
 ```powershell
 cd backend
-C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+C:\Users\bzp20\miniconda3\envs\agent-dev\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
 终端 B（前端，端口 5173）：

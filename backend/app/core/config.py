@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     # 认证 / 服务
     jwt_secret: str = "change-me-in-production"
     jwt_expire_hours: int = 24
-    backend_port: int = 8000
+    backend_port: int = 8010
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
 
     @property
