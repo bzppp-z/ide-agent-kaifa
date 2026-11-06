@@ -28,6 +28,8 @@ export interface Message {
 }
 
 export interface SessionDetail extends Session {
+  /** 最近一次上下文压缩生成的结构化摘要。 */
+  summary_text?: string | null;
   messages: Message[];
 }
 

@@ -559,15 +559,29 @@ class ToolRegistry:
                 },
             )
 
+        # 单文件补丁同样要进检查点快照与变更记录（与批次写入保持一致）
+        self._capture_checkpoints(workspace_path, [relative])
         sandbox.write_file(workspace_path, relative, after)
         if repo_index is not None:
             repo_index.invalidate(relative)
 
+        entry = {
+            "path": relative,
+            "operation": "update",
+            "before": before,
+            "after": after,
+        }
         return ToolResult(
             ok=True,
             summary=f"patched {relative}",
             details=f"replaced 1 occurrence in {relative}",
-            extra={"path": relative, "before": before, "after": after, "applied": True},
+            extra={
+                "path": relative,
+                "before": before,
+                "after": after,
+                "applied": True,
+                "changes": [_change_record(entry, "applied")],
+            },
         )
 
     # ------------------------------------------------------- command tools

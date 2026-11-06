@@ -7,8 +7,10 @@
 
 import asyncio
 import logging
+import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -429,22 +431,35 @@ class RepoIndex:
 
     def _live_symbols(self) -> tuple[list[dict[str, Any]], int]:
         records, _ = self._file_records()
-        symbols: list[dict[str, Any]] = []
-        files_scanned = 0
-        for entry in records:
-            if not _is_indexable(entry["path"]) or entry["size"] > MAX_SYMBOL_FILE_BYTES:
-                continue
-            files_scanned += 1
+        candidates = [
+            entry
+            for entry in records
+            if _is_indexable(entry["path"]) and entry["size"] <= MAX_SYMBOL_FILE_BYTES
+        ]
+        return self._load_symbols(candidates), len(candidates)
+
+    def _load_symbols(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """并行读取索引文件并提取符号（IO 密集，线程池可显著缩短构建时间）。"""
+        if not candidates:
+            return []
+
+        def load(entry: dict[str, Any]) -> list[dict[str, Any]]:
             try:
                 content = self.sandbox.read_file(self.workspace_path, entry["path"])
             except (FileNotFoundError, OSError, UnicodeDecodeError):
-                continue
-            symbols.extend(_extract_symbols(entry["path"], content))
-        return symbols, files_scanned
+                return []
+            return _extract_symbols(entry["path"], content)
+
+        workers = min(16, (os.cpu_count() or 4) * 2)
+        symbols: list[dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for chunk in pool.map(load, candidates):
+                symbols.extend(chunk)
+        symbols.sort(key=lambda symbol: (symbol["path"], symbol["line"]))
+        return symbols
 
     def _scan(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
         files: list[dict[str, Any]] = []
-        symbols: list[dict[str, Any]] = []
         truncated = False
 
         def walk(directory: str) -> None:
@@ -469,20 +484,16 @@ class RepoIndex:
                     truncated = True
                     return
 
-                path = entry["path"]
-                size = int(entry.get("size") or 0)
-                files.append({"path": path, "size": size})
-
-                if not _is_indexable(path) or size > MAX_SYMBOL_FILE_BYTES:
-                    continue
-                try:
-                    content = self.sandbox.read_file(self.workspace_path, path)
-                except (FileNotFoundError, OSError, UnicodeDecodeError):
-                    continue
-                symbols.extend(_extract_symbols(path, content))
+                files.append({"path": entry["path"], "size": int(entry.get("size") or 0)})
 
         walk("")
-        return files, symbols, truncated
+
+        candidates = [
+            entry
+            for entry in files
+            if _is_indexable(entry["path"]) and entry["size"] <= MAX_SYMBOL_FILE_BYTES
+        ]
+        return files, self._load_symbols(candidates), truncated
 
 
 def _build_matcher(query: str):

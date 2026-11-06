@@ -1,9 +1,11 @@
+import { useEffect, useState } from "react";
 import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
 
 import { useEditorStore } from "../stores/useEditorStore";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
 import { Spinner } from "./ui/spinner";
+import { EditorTabs } from "./EditorTabs";
 
 function languageFor(path: string | null): string {
   if (!path) return "plaintext";
@@ -33,10 +35,6 @@ function languageFor(path: string | null): string {
     default:
       return "plaintext";
   }
-}
-
-function baseName(path: string): string {
-  return path.split("/").pop() || path;
 }
 
 /** 自定义深色主题，主背景对齐品牌 #0B0D0E / 面板 #131619。 */
@@ -70,61 +68,124 @@ function defineDevFlowTheme(monaco: Monaco): void {
   });
 }
 
+function ConflictBanner({ path }: { path: string }) {
+  const tab = useEditorStore((state) =>
+    state.tabs.find((item) => item.path === path),
+  );
+  const resolveConflict = useEditorStore((state) => state.resolveConflict);
+  const [showDiff, setShowDiff] = useState(false);
+
+  useEffect(() => setShowDiff(false), [path]);
+
+  if (!tab?.conflict) return null;
+  const deleted = tab.conflict.agentContent === null;
+
+  return (
+    <div className="shrink-0 border-b border-yellow-500/25 bg-yellow-500/5 px-3 py-1.5">
+      <div className="flex flex-wrap items-center gap-2 text-[11px] text-yellow-400/90">
+        <span>
+          {deleted
+            ? "agent 删除了这个文件，但你有未保存的修改"
+            : "agent 修改了这个文件，你的未保存内容未被覆盖"}
+        </span>
+        <div className="ml-auto flex items-center gap-1.5">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 text-[11px]"
+            onClick={() => setShowDiff((value) => !value)}
+          >
+            {showDiff ? "收起差异" : "查看差异"}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 text-[11px]"
+            onClick={() => resolveConflict(path, "mine")}
+          >
+            保留我的
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 text-[11px]"
+            onClick={() => resolveConflict(path, "agent")}
+          >
+            {deleted ? "接受删除" : "使用 agent 版本"}
+          </Button>
+        </div>
+      </div>
+
+      {showDiff ? (
+        <div className="mt-1.5 grid grid-cols-2 gap-2">
+          <div className="min-w-0">
+            <div className="mb-1 text-[10px] text-muted-dim">我的版本</div>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-surface-border bg-bg px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-muted">
+              {tab.content || "（空）"}
+            </pre>
+          </div>
+          <div className="min-w-0">
+            <div className="mb-1 text-[10px] text-muted-dim">agent 版本</div>
+            <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-surface-border bg-bg px-2 py-1.5 font-mono text-[10.5px] leading-relaxed text-muted">
+              {deleted ? "（文件已删除）" : tab.conflict.agentContent || "（空）"}
+            </pre>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function MonacoEditor() {
-  const filePath = useEditorStore((state) => state.filePath);
-  const content = useEditorStore((state) => state.content);
-  const dirty = useEditorStore((state) => state.dirty);
-  const saving = useEditorStore((state) => state.saving);
-  const loading = useEditorStore((state) => state.loading);
-  const truncated = useEditorStore((state) => state.truncated);
-  const error = useEditorStore((state) => state.error);
+  const tabs = useEditorStore((state) => state.tabs);
+  const activePath = useEditorStore((state) => state.activePath);
   const handleChange = useEditorStore((state) => state.handleChange);
   const save = useEditorStore((state) => state.save);
-  const close = useEditorStore((state) => state.close);
 
-  const saveState = saving ? "保存中…" : dirty ? "未保存" : "已保存";
+  const activeTab = activePath
+    ? tabs.find((tab) => tab.path === activePath)
+    : undefined;
+
+  const saveState = activeTab?.saving
+    ? "保存中…"
+    : activeTab?.dirty
+      ? "未保存"
+      : "已保存";
 
   const handleMount: OnMount = (editor, monaco) => {
     // Ctrl/Cmd+S 立即保存，阻止浏览器另存为。
-    editor.addCommand(
-      monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
-      () => void useEditorStore.getState().save(),
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
+      void useEditorStore.getState().save(),
     );
     editor.focus();
   };
 
   return (
     <section className="flex min-h-0 flex-1 flex-col bg-bg">
-      {filePath ? (
-        <div className="flex h-8 shrink-0 items-end gap-px overflow-x-auto border-b border-surface-border bg-surface">
-          <div className="flex h-7 items-center gap-2 border-r border-surface-border bg-surface-alt px-2.5 text-[12px] text-text">
-            <span className="truncate font-mono">{baseName(filePath)}</span>
-            {dirty ? (
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-brand" />
-            ) : null}
-            <button
-              type="button"
-              title="关闭"
-              onClick={close}
-              className="ml-1 flex h-4 w-4 items-center justify-center rounded text-muted-dim hover:bg-surface hover:text-text"
-            >
-              ×
-            </button>
-          </div>
-        </div>
-      ) : null}
+      <EditorTabs />
 
       <header className="flex h-9 shrink-0 items-center gap-2 border-b border-surface-border bg-surface px-3">
         <span className="truncate font-mono text-[12px] text-muted">
-          {filePath ?? "未打开文件"}
+          {activeTab?.path ?? "未打开文件"}
         </span>
-        {filePath ? (
+        {activeTab ? (
           <span className="ml-auto flex shrink-0 items-center gap-2">
-            {truncated ? <Badge tone="warning">已截断</Badge> : null}
-            {loading ? (
+            {activeTab.agentUpdated ? (
+              <Badge tone="brand">agent 已更新</Badge>
+            ) : null}
+            {activeTab.truncated ? <Badge tone="warning">已截断</Badge> : null}
+            {activeTab.loading ? (
               <Spinner size={10} />
             ) : (
-              <Badge tone={saving ? "warning" : dirty ? "danger" : "neutral"}>
+              <Badge
+                tone={
+                  activeTab.saving
+                    ? "warning"
+                    : activeTab.dirty
+                      ? "danger"
+                      : "neutral"
+                }
+              >
                 {saveState}
               </Badge>
             )}
@@ -132,7 +193,7 @@ export function MonacoEditor() {
               size="sm"
               variant="outline"
               onClick={() => void save()}
-              disabled={saving || !dirty}
+              disabled={activeTab.saving || !activeTab.dirty}
             >
               保存
             </Button>
@@ -140,17 +201,19 @@ export function MonacoEditor() {
         ) : null}
       </header>
 
+      {activeTab?.conflict ? <ConflictBanner path={activeTab.path} /> : null}
+
       <div className="relative min-h-0 flex-1">
-        {filePath ? (
+        {activeTab ? (
           <Editor
             height="100%"
             theme="devflow-dark"
             beforeMount={defineDevFlowTheme}
             onMount={handleMount}
-            path={filePath}
-            language={languageFor(filePath)}
-            value={content}
-            onChange={(value) => handleChange(value ?? "")}
+            path={activeTab.path}
+            language={languageFor(activeTab.path)}
+            value={activeTab.content}
+            onChange={(value) => handleChange(activeTab.path, value ?? "")}
             loading={
               <div className="flex h-full items-center gap-2 bg-bg px-4 text-[12px] text-muted-dim">
                 <Spinner size={11} />
@@ -179,9 +242,9 @@ export function MonacoEditor() {
           </div>
         )}
 
-        {error && filePath ? (
+        {activeTab?.error ? (
           <div className="absolute inset-x-0 bottom-0 border-t border-red-500/20 bg-red-500/5 px-3 py-1.5 text-[11px] text-red-400/90">
-            {error}
+            {activeTab.error}
           </div>
         ) : null}
       </div>

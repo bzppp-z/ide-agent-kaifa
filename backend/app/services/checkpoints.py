@@ -6,6 +6,8 @@
 不会写入用户本地目录，也不会在回滚时整目录删除。
 """
 
+from __future__ import annotations
+
 import hashlib
 import json
 import shutil
@@ -106,15 +108,15 @@ class CheckpointService:
         checkpoint_id: str,
         sandbox: SandboxService,
         container_id: str | None = None,
-    ) -> int:
-        """逐文件恢复检查点快照，返回恢复文件数；不删除整个目录。"""
+    ) -> list[str]:
+        """逐文件恢复检查点快照，返回实际恢复的相对路径；不删除整个目录。"""
         index = self._read_index(session_id)
         checkpoint = self._find(index, checkpoint_id)
         if checkpoint is None:
             raise ValueError("checkpoint not found")
 
         workspace = container_id or str(self.root_dir.parent / f"session-{session_id}")
-        restored = 0
+        restored: list[str] = []
         for relative, meta in (checkpoint.get("files") or {}).items():
             safe_relative = validate_workspace_path(relative)
             if meta.get("exists"):
@@ -130,7 +132,7 @@ class CheckpointService:
                     sandbox.delete_file(workspace, safe_relative)
                 except FileNotFoundError:
                     pass
-            restored += 1
+            restored.append(safe_relative)
         return restored
 
     def get(self, session_id: str, checkpoint_id: str) -> dict[str, Any] | None:

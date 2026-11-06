@@ -1,7 +1,13 @@
 import { create } from "zustand";
 
-import { formatError, runAgent, stopRun } from "../lib/api";
-import type { ChangeFile, Message, PlanState, SSEEvent } from "../lib/types";
+import { formatError, listChanges, runAgent, stopRun } from "../lib/api";
+import type {
+  ChangeFile,
+  ChangeRecord,
+  Message,
+  PlanState,
+  SSEEvent,
+} from "../lib/types";
 import { useEditorStore } from "./useEditorStore";
 import { useSessionStore } from "./useSessionStore";
 import { useWorkspaceStore } from "./useWorkspaceStore";
@@ -13,6 +19,8 @@ export interface ChatUserItem {
   kind: "user";
   content: string;
   createdAt: number;
+  /** 检查点回滚后，位于回滚点之后的消息置灰。 */
+  reverted?: boolean;
 }
 
 export interface ChatAssistantItem {
@@ -20,6 +28,7 @@ export interface ChatAssistantItem {
   kind: "assistant";
   content: string;
   streaming: boolean;
+  reverted?: boolean;
 }
 
 export interface ChatToolItem {
@@ -147,6 +156,8 @@ interface ChatState {
   items: ChatItem[];
   /** 当前 run 的任务计划；刷新后由 session detail 恢复。 */
   plan: PlanState | null;
+  /** 会话变更清单（GET /sessions/{id}/changes）。 */
+  changes: ChangeRecord[];
   streaming: boolean;
   runId: string | null;
   error: string | null;
@@ -157,6 +168,7 @@ interface ChatState {
   /** 刷新恢复：用 GET session 返回的历史消息重建气泡（不覆盖正在流式的 run）。 */
   loadHistory: (messages: Message[]) => void;
   setPlan: (plan: PlanState | null) => void;
+  loadChanges: (sessionId: string) => Promise<void>;
   setSseAbort: (controller: AbortController | null) => void;
   /** 标记某个 patch 卡片的处理结果（PatchDiff 在决议成功后调用）。 */
   setPatchStatus: (patchId: string, status: "accepted" | "rejected") => void;
@@ -177,6 +189,7 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set, get) => ({
   items: [],
   plan: null,
+  changes: [],
   streaming: false,
   runId: null,
   error: null,
@@ -226,16 +239,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   pushEvent: (event) => {
-    // file.changed 没有对应聊天气泡，直接刷新文件树/编辑器。
+    // file.changed 没有对应聊天气泡，直接刷新文件树与已打开标签。
     if (event.type === "file.changed") {
       const sessionId = useSessionStore.getState().id;
       if (sessionId) {
         void useWorkspaceStore.getState().loadTree(sessionId);
-        const editor = useEditorStore.getState();
-        if (editor.filePath === event.path && !editor.dirty) {
-          if (event.operation === "delete") editor.close();
-          else void editor.open(sessionId, event.path);
-        }
+        void useEditorStore
+          .getState()
+          .handleFileChanged(sessionId, event.path, event.operation);
       }
       return;
     }
@@ -524,6 +535,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setPlan: (plan) =>
     set({ plan: plan && Array.isArray(plan.items) && plan.items.length > 0 ? plan : null }),
 
+  loadChanges: async (sessionId) => {
+    try {
+      const changes = await listChanges(sessionId);
+      set({ changes });
+    } catch {
+      // 变更清单是辅助信息，失败不打断对话
+    }
+  },
+
   loadHistory: (messages) => {
     if (get().streaming) return;
 
@@ -535,6 +555,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           kind: "user",
           content: message.content,
           createdAt: Date.parse(message.created_at) || Date.now(),
+          reverted: Boolean(message.reverted),
         });
         continue;
       }
@@ -551,6 +572,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           kind: "assistant",
           content: message.content,
           streaming: false,
+          reverted: Boolean(message.reverted),
         });
       }
     }
@@ -624,6 +646,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({
       items: [],
       plan: null,
+      changes: [],
       streaming: false,
       runId: null,
       error: null,

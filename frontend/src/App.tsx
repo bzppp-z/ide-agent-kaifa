@@ -6,6 +6,7 @@ import { MonacoEditor } from "./components/MonacoEditor";
 import { TopBar } from "./components/TopBar";
 import { TerminalPanel } from "./components/terminal/TerminalPanel";
 import { useSSE } from "./lib/sse";
+import { useEditorStore } from "./stores/useEditorStore";
 import { useSessionStore } from "./stores/useSessionStore";
 
 export default function App() {
@@ -26,6 +27,18 @@ export default function App() {
   }, []);
 
   useSSE(sessionId);
+
+  // 存在未保存标签时，刷新/关闭页面给出浏览器原生确认。
+  useEffect(() => {
+    const handler = (event: BeforeUnloadEvent) => {
+      if (useEditorStore.getState().tabs.some((tab) => tab.dirty)) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, []);
 
   const retry = () => {
     const state = useSessionStore.getState();

@@ -4,6 +4,7 @@ import type { KeyboardEvent } from "react";
 import type { ChatContextItem, ChatItem } from "../stores/useChatStore";
 import { useChatStore } from "../stores/useChatStore";
 import { useSessionStore } from "../stores/useSessionStore";
+import { ChangeList } from "./ChangeList";
 import { ChangeSetCard } from "./ChangeSetCard";
 import { CommandCard } from "./CommandCard";
 import { PatchDiff } from "./PatchDiff";
@@ -135,6 +136,8 @@ function ChatEventView({
 export function ChatPanel() {
   const items = useChatStore((state) => state.items);
   const plan = useChatStore((state) => state.plan);
+  const changes = useChatStore((state) => state.changes);
+  const loadChanges = useChatStore((state) => state.loadChanges);
   const streaming = useChatStore((state) => state.streaming);
   const sendMessage = useChatStore((state) => state.sendMessage);
   const stopStreaming = useChatStore((state) => state.stopStreaming);
@@ -142,12 +145,18 @@ export function ChatPanel() {
   const containerStatus = useSessionStore((state) => state.containerStatus);
 
   const [draft, setDraft] = useState("");
+  const [changesOpen, setChangesOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const element = listRef.current;
     if (element) element.scrollTop = element.scrollHeight;
   }, [items, streaming]);
+
+  // run 结束后刷新变更清单（落盘/失败状态以数据库为准）
+  useEffect(() => {
+    if (sessionId && !streaming) void loadChanges(sessionId);
+  }, [sessionId, streaming, loadChanges]);
 
   const lastDone = [...items]
     .reverse()
@@ -210,15 +219,36 @@ export function ChatPanel() {
           </div>
         ) : (
           <div className="space-y-2.5">
-            {items.map((item) => (
-              <ChatEventView
-                key={item.id}
-                item={item}
-                streaming={streaming}
-              />
-            ))}
+            {items.map((item) => {
+              const reverted =
+                "reverted" in item && Boolean(item.reverted);
+              return (
+                <div
+                  key={item.id}
+                  className={reverted ? "opacity-40" : undefined}
+                  title={reverted ? "已回滚" : undefined}
+                >
+                  <ChatEventView item={item} streaming={streaming} />
+                </div>
+              );
+            })}
           </div>
         )}
+      </div>
+
+      <div className="flex shrink-0 items-center justify-between border-t border-surface-border px-3 py-1.5">
+        <button
+          type="button"
+          onClick={() => setChangesOpen(true)}
+          className="flex items-center gap-1.5 text-[10.5px] text-muted-dim transition-colors hover:text-text"
+          title="查看本次会话的文件变更"
+        >
+          变更清单
+          <span className="font-mono text-[10.5px] text-text">
+            {changes.length}
+          </span>
+        </button>
+        <span className="text-[10px] text-muted-dim">检查点入口在顶栏</span>
       </div>
 
       <footer className="shrink-0 border-t border-surface-border p-3">
@@ -267,6 +297,10 @@ export function ChatPanel() {
           </div>
         </div>
       </footer>
+
+      {changesOpen ? (
+        <ChangeList onClose={() => setChangesOpen(false)} />
+      ) : null}
     </aside>
   );
 }

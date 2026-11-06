@@ -59,4 +59,6 @@ class SessionDetailResponse(SessionResponse):
 
     # 当前会话绑定的用户真实目录；demo 会话为 None
     local_path: str | None = None
+    # 最近一次上下文压缩生成的结构化摘要；未压缩过为 None
+    summary_text: str | None = None
     messages: list[MessageResponse] = Field(default_factory=list)

@@ -36,8 +36,8 @@ export function PatchDiff({
       // 接受后重新加载当前打开的文件（若正好是 patch 目标）
       if (accepted && sessionId) {
         const editor = useEditorStore.getState();
-        if (editor.filePath === item.path) {
-          await editor.open(sessionId, item.path);
+        if (editor.tabs.some((tab) => tab.path === item.path)) {
+          await editor.reloadTab(sessionId, item.path);
         }
       }
     } catch (cause) {

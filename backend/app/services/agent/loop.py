@@ -331,7 +331,59 @@ class AgentLoop:
                         permission_mode=permission_mode,
                         repo_index=repo_index,
                     )
-                    if preview.ok and preview.extra:
+                    auto_mode = normalize_permission_mode(permission_mode) == "auto"
+                    if preview.ok and preview.extra and auto_mode:
+                        # auto 模式：单文件补丁直接落盘，发只读摘要卡片，不等待审批。
+                        result = await tools.call(
+                            "write_patch",
+                            arguments,
+                            sandbox,
+                            session_workspace_path,
+                            permission_mode=permission_mode,
+                            repo_index=repo_index,
+                        )
+                        result.duration_ms = int(
+                            (time.perf_counter() - started_at) * 1000
+                        )
+                        path = str(preview.extra.get("path") or "")
+                        before = str(preview.extra.get("before") or "")
+                        after = str(preview.extra.get("after") or "")
+                        added = max(
+                            0, len(after.splitlines()) - len(before.splitlines())
+                        )
+                        deleted = max(
+                            0, len(before.splitlines()) - len(after.splitlines())
+                        )
+                        entry = {
+                            "path": path,
+                            "operation": "update",
+                            "added": added,
+                            "deleted": deleted,
+                            "before": before,
+                            "after": after,
+                            "diff": _render_patch_diff(path, before, after),
+                            "status": "applied" if result.ok else "conflict",
+                        }
+                        if result.ok:
+                            result.extra = {
+                                **(result.extra or {}),
+                                "changes": [entry],
+                            }
+                            yield ChangeSetProposedEvent(
+                                change_set_id=str(uuid4()),
+                                files=[entry],
+                                auto=True,
+                                auto_applied=True,
+                            )
+                            yield FileChangedEvent(path=path, operation="write")
+                        else:
+                            yield ChangeSetProposedEvent(
+                                change_set_id=str(uuid4()),
+                                files=[entry],
+                                auto=True,
+                                auto_applied=False,
+                            )
+                    elif preview.ok and preview.extra:
                         patch_id, proposed = self._prepare_patch(
                             session_id=session_id,
                             arguments=arguments,

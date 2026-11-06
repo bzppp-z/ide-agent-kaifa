@@ -134,6 +134,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       const detail = await getSession(id);
       useChatStore.getState().loadHistory(detail.messages);
       useChatStore.getState().setPlan(detail.plan ?? null);
+      void useChatStore.getState().loadChanges(id);
       set({
         demoRepo: detail.demo_repo,
         localPath: detail.local_path ?? null,
@@ -143,6 +144,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
       persistSession(id, token);
       await get().refreshSandbox();
+      // 刷新后恢复上次打开的标签（仅同一会话）。
+      await useEditorStore.getState().restoreTabs(id);
       return true;
     } catch (error) {
       set({

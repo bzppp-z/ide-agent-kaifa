@@ -26,6 +26,7 @@ container_id / workspace_path 必须落在 ``WORKSPACE_ROOT_DIR`` 内。
 import asyncio
 import contextlib
 import hashlib
+import os
 import shutil
 import sys
 from collections.abc import Awaitable, Callable
@@ -45,6 +46,9 @@ class SandboxService:
         self._external_workspaces: set[Path] = set()
         # 每个 workspace 一把命令锁：agent 命令与终端输入互斥。
         self.command_locks: dict[str, asyncio.Lock] = {}
+        # 已解析的 container 绝对路径缓存：Path.resolve 在 Windows 上开销较大，
+        # 高频文件操作（索引构建等）不应每次都重复解析。
+        self._resolved_containers: dict[str, Path] = {}
 
     # ------------------------------------------------------------------ sessions
 
@@ -67,6 +71,7 @@ class SandboxService:
         resolved = workspace.expanduser().resolve()
         self._assert_inside_root(resolved)
         resolved.mkdir(parents=True, exist_ok=True)
+        self._resolved_containers[str(resolved)] = resolved
         return str(resolved)
 
     async def exec(self, container_id: str, command: str, timeout: float = MAX_EXEC_TIMEOUT_SECONDS) -> tuple[int, str]:
@@ -177,6 +182,7 @@ class SandboxService:
             return
         if workspace.exists():
             await asyncio.to_thread(shutil.rmtree, workspace, True)
+            self._resolved_containers.pop(container_id, None)
 
     # --------------------------------------------------------------------- shell
 
@@ -257,20 +263,26 @@ class SandboxService:
             raise ValueError(f"path is not a directory: {relative_path!r}")
 
         entries: list[dict[str, Any]] = []
-        for entry in sorted(base.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
-            if entry.is_dir():
-                entry_type, size = "dir", 0
-            else:
-                entry_type, size = "file", entry.stat().st_size
-            entries.append(
-                {
-                    "name": entry.name,
-                    "path": f"{relative}/{entry.name}" if relative else entry.name,
-                    "type": entry_type,
-                    "size": size,
-                    "mtime": entry.stat().st_mtime,
-                }
-            )
+        # 用 scandir 缓存的 DirEntry 信息，避免每个条目多次 stat。
+        with os.scandir(base) as iterator:
+            for entry in iterator:
+                is_dir = entry.is_dir()
+                size = 0
+                mtime = 0.0
+                if not is_dir:
+                    stat = entry.stat()
+                    size = stat.st_size
+                    mtime = stat.st_mtime
+                entries.append(
+                    {
+                        "name": entry.name,
+                        "path": f"{relative}/{entry.name}" if relative else entry.name,
+                        "type": "dir" if is_dir else "file",
+                        "size": size,
+                        "mtime": mtime,
+                    }
+                )
+        entries.sort(key=lambda item: (item["type"] != "dir", item["name"].lower()))
         return entries
 
     # ------------------------------------------------------------------ internal
@@ -287,6 +299,12 @@ class SandboxService:
         if not isinstance(container_id, str) or not container_id.strip():
             raise ValueError("container_id must not be empty")
 
+        cached = self._resolved_containers.get(container_id)
+        if cached is not None:
+            if must_exist and not cached.exists():
+                raise ValueError(f"workspace does not exist: {container_id!r}")
+            return cached
+
         path = Path(container_id).expanduser()
         if not path.is_absolute():
             raise ValueError(f"container_id must be an absolute workspace path: {container_id!r}")
@@ -295,6 +313,7 @@ class SandboxService:
         self._assert_inside_root(resolved)
         if must_exist and not resolved.exists():
             raise ValueError(f"workspace does not exist: {container_id!r}")
+        self._resolved_containers[container_id] = resolved
         return resolved
 
 

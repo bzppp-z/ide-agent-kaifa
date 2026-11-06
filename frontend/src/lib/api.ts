@@ -3,6 +3,7 @@ import { SseParser } from "./sseParser";
 import type {
   ChangeRecord,
   ChangeSetDecisionResult,
+  Checkpoint,
   CommandDecisionResult,
   FileContent,
   FileWriteResult,
@@ -274,6 +275,24 @@ export function respondCommand(
 /** 会话变更清单（Phase 6 的变更面板使用）。 */
 export function listChanges(sessionId: string): Promise<ChangeRecord[]> {
   return apiFetch<ChangeRecord[]>(`/sessions/${encodeURIComponent(sessionId)}/changes`);
+}
+
+/** 会话检查点列表（后端最多返回最新 50 条，按时间倒序）。 */
+export function listCheckpoints(sessionId: string): Promise<Checkpoint[]> {
+  return apiFetch<Checkpoint[]>(
+    `/sessions/${encodeURIComponent(sessionId)}/checkpoints`,
+  );
+}
+
+/** 回滚到指定检查点之前：恢复快照，之后的改动与消息标记为 reverted。 */
+export function rollbackCheckpoint(
+  sessionId: string,
+  checkpointId: string,
+): Promise<{ ok: true; restored: number; checkpoint_id: string }> {
+  return apiFetch(
+    `/sessions/${encodeURIComponent(sessionId)}/checkpoints/${encodeURIComponent(checkpointId)}/rollback`,
+    { method: "POST" },
+  );
 }
 
 /**

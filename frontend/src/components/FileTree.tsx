@@ -38,7 +38,7 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
 
   const sessionId = useSessionStore((state) => state.id);
   const open = useEditorStore((state) => state.open);
-  const selectedPath = useEditorStore((state) => state.filePath);
+  const selectedPath = useEditorStore((state) => state.activePath);
 
   const isDir = node.type === "dir";
   const selected = !isDir && selectedPath === node.path;

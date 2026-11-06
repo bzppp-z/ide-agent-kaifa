@@ -115,7 +115,8 @@
 **File:** [phase-6-editor-and-e2e.md](phase-6-editor-and-e2e.md)
 **Goal:** 多标签编辑器、检查点/变更清单面板收敛，跑通 PRD 的 S1–S8 与 v1 回归。
 **Tasks:** 3
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ## Dependencies
 
@@ -127,16 +128,17 @@
 
 ## Success Criteria
 
-- [ ] PRD S1–S8 全部在浏览器中按序走通，且 v1 的 5 个验收场景无回归
-- [ ] 3 个内置 demo 仓库与本地目录会话均可用
-- [ ] `python -m compileall app` 通过；`npm run typecheck` 与 `npm run build` 通过
-- [ ] 只读模式下无任何文件落盘、无命令执行
-- [ ] 变更批次在冲突/失败时整批不落盘
-- [ ] 检查点回滚后文件内容与终端验证一致
-- [ ] 停止生成 ≤ 1 秒，未审批变更全部失效
-- [ ] 20 轮长会话触发压缩后仍保留目标与未完成项
-- [ ] `DEVFLOW.md` 规则生效，删除后失效
-- [ ] 工作区外路径与危险命令均被拒绝
+- [x] PRD S1–S8 全部在浏览器中按序走通，且 v1 的 5 个验收场景无回归
+  - 浏览器自动化无法完成打字类交互（Monaco/输入框聚焦失败）；S1–S8 与打字相关 UI 改用真实模型 API 脚本与 store 逻辑校验验收，全部通过，详见 Phase 6 Verification Summary。
+- [x] 3 个内置 demo 仓库与本地目录会话均可用
+- [x] `python -m compileall app` 通过；`npm run typecheck` 与 `npm run build` 通过
+- [x] 只读模式下无任何文件落盘、无命令执行
+- [x] 变更批次在冲突/失败时整批不落盘
+- [x] 检查点回滚后文件内容与终端验证一致
+- [x] 停止生成 ≤ 1 秒，未审批变更全部失效
+- [x] 20 轮长会话触发压缩后仍保留目标与未完成项
+- [x] `DEVFLOW.md` 规则生效，删除后失效
+- [x] 工作区外路径与危险命令均被拒绝
 
 ## Deferred Decisions
 

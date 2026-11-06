@@ -9,7 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_session
-from app.api.sessions import ensure_session_ownership, load_session_or_404
+from app.api.sessions import (
+    broadcast_file_changed,
+    ensure_session_ownership,
+    load_session_or_404,
+)
 from app.core.security import validate_workspace_path
 from app.db import get_db_session
 from app.schemas.file import FileContentResponse, FileWriteRequest
@@ -88,5 +92,7 @@ async def write_file(
     index = getattr(request.app.state, "repo_indexes", {}).get(session_id)
     if index is not None:
         index.invalidate(relative)
+
+    broadcast_file_changed(request, session_id, [relative], "write")
 
     return {"ok": True, "path": relative}

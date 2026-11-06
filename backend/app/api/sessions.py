@@ -14,6 +14,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_session
+from app.core.events import FileChangedEvent
 from app.core.security import validate_local_workspace_path
 from app.db import get_db_session, utcnow
 from app.models.change import ChangeRecord
@@ -43,6 +44,23 @@ def ensure_session_ownership(session_id: str, current_session: str) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="token does not belong to this session",
         )
+
+
+def broadcast_file_changed(
+    request: Request,
+    session_id: str,
+    paths: list[str],
+    operation: str = "write",
+) -> None:
+    """把文件变更送进当前 run 的 SSE 队列；没有活跃 run 时静默跳过。"""
+    state = getattr(request.app.state, "loop_states", {}).get(session_id)
+    queue = state.get("queue") if state else None
+    if queue is None:
+        return
+    for path in paths:
+        if not path:
+            continue
+        queue.put_nowait(FileChangedEvent(path=path, operation=operation))
 
 
 def _parse_plan(row: SessionModel) -> dict | None:
@@ -148,6 +166,7 @@ async def get_session(
     return SessionDetailResponse(
         **base.model_dump(),
         local_path=row.local_path,
+        summary_text=row.summary_text,
         messages=[
             MessageResponse(
                 id=message.id,
@@ -204,6 +223,15 @@ async def rollback_checkpoint(
     ensure_session_ownership(session_id, current_session)
     await load_session_or_404(db, session_id)
 
+    loop_state = getattr(request.app.state, "loop_states", {}).get(session_id)
+    if loop_state is not None:
+        task = loop_state.get("task")
+        if task is not None and not task.done():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="run in progress; stop it before rolling back",
+            )
+
     checkpoints = request.app.state.checkpoints
     checkpoint = checkpoints.get(session_id, checkpoint_id)
     if checkpoint is None:
@@ -212,12 +240,19 @@ async def rollback_checkpoint(
         )
 
     workspace_path = await request.app.state.workspace.ensure_container(session_id)
-    restored = checkpoints.rollback(
+    restored_paths = checkpoints.rollback(
         session_id,
         checkpoint_id,
         request.app.state.workspace.sandbox,
         container_id=workspace_path,
     )
+    broadcast_file_changed(request, session_id, restored_paths, "rollback")
+
+    # 回滚后不允许残留待审批批次/命令（以“拒绝”唤醒等待方）
+    for registry_name in ("pending_change_sets", "pending_commands"):
+        registry = getattr(request.app.state, registry_name, None)
+        if registry is not None:
+            registry.discard_all(session_id)
 
     cutoff = checkpoint_datetime(checkpoint)
     await db.execute(
@@ -236,7 +271,7 @@ async def rollback_checkpoint(
         "ok": True,
         "session_id": session_id,
         "checkpoint_id": checkpoint_id,
-        "restored": restored,
+        "restored": len(restored_paths),
     }
 
 

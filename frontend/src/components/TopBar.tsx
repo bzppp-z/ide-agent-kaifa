@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { PermissionMode } from "../lib/types";
 import { useProviderStore } from "../stores/useProviderStore";
 import { useSessionStore } from "../stores/useSessionStore";
+import { CheckpointPanel } from "./CheckpointPanel";
 import { ModelSettingsDialog } from "./ModelSettingsDialog";
 import { NewSessionDialog } from "./NewSessionDialog";
 import { SandboxStatus } from "./SandboxStatus";
@@ -19,6 +20,7 @@ export function TopBar({ onRetry }: { onRetry: () => void }) {
 
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
 
   useEffect(() => {
     void loadProviders();
@@ -65,6 +67,15 @@ export function TopBar({ onRetry }: { onRetry: () => void }) {
           </select>
         </label>
 
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setCheckpointsOpen(true)}
+          title="查看检查点并回滚"
+        >
+          检查点
+        </Button>
+
         <SandboxStatus onRetry={onRetry} />
 
         <Button
@@ -84,6 +95,10 @@ export function TopBar({ onRetry }: { onRetry: () => void }) {
 
       {modelSettingsOpen ? (
         <ModelSettingsDialog onClose={() => setModelSettingsOpen(false)} />
+      ) : null}
+
+      {checkpointsOpen ? (
+        <CheckpointPanel onClose={() => setCheckpointsOpen(false)} />
       ) : null}
     </header>
   );
