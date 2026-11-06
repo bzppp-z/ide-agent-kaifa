@@ -94,7 +94,8 @@
 **File:** [phase-3-multifile-edits-and-checkpoints.md](phase-3-multifile-edits-and-checkpoints.md)
 **Goal:** 支持新建/整文件写入/删除/批量补丁，批次原子落盘并按文件审批；run 级检查点可回滚；变更清单可查。
 **Tasks:** 4
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ### Phase 4: 验证闭环
 **File:** [phase-4-verification-loop.md](phase-4-verification-loop.md)

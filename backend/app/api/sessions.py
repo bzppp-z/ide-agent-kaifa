@@ -10,16 +10,19 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_session
 from app.core.security import validate_local_workspace_path
 from app.db import get_db_session, utcnow
+from app.models.change import ChangeRecord
 from app.models.message import Message as MessageModel
 from app.models.session import Session as SessionModel
 from app.schemas.message import MessageResponse
 from app.schemas.session import (
+    ChangeRecordResponse,
+    CheckpointResponse,
     SessionCreate,
     SessionCreatedResponse,
     SessionDetailResponse,
@@ -27,6 +30,7 @@ from app.schemas.session import (
     SessionResponse,
 )
 from app.services.auth import create_session_token
+from app.services.checkpoints import checkpoint_datetime
 from app.services.demo_repos import get_demo_repo
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -60,6 +64,7 @@ def session_to_response(row: SessionModel) -> SessionResponse:
         created_at=row.created_at,
         permission_mode=row.permission_mode or "approval",  # type: ignore[arg-type]
         plan=_parse_plan(row),
+        last_checkpoint_id=row.last_checkpoint_id,
     )
 
 
@@ -174,6 +179,100 @@ async def update_session_preferences(
     return session_to_response(row)
 
 
+@router.get("/{session_id}/checkpoints", response_model=list[CheckpointResponse])
+async def list_checkpoints(
+    session_id: str,
+    request: Request,
+    current_session: str = Depends(get_current_session),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[CheckpointResponse]:
+    ensure_session_ownership(session_id, current_session)
+    await load_session_or_404(db, session_id)
+    rows = request.app.state.checkpoints.list(session_id)
+    return [CheckpointResponse(**row) for row in rows]
+
+
+@router.post("/{session_id}/checkpoints/{checkpoint_id}/rollback")
+async def rollback_checkpoint(
+    session_id: str,
+    checkpoint_id: str,
+    request: Request,
+    current_session: str = Depends(get_current_session),
+    db: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """恢复检查点快照；该时间点之后的消息与变更记录标记为 reverted。"""
+    ensure_session_ownership(session_id, current_session)
+    await load_session_or_404(db, session_id)
+
+    checkpoints = request.app.state.checkpoints
+    checkpoint = checkpoints.get(session_id, checkpoint_id)
+    if checkpoint is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="checkpoint not found"
+        )
+
+    workspace_path = await request.app.state.workspace.ensure_container(session_id)
+    restored = checkpoints.rollback(
+        session_id,
+        checkpoint_id,
+        request.app.state.workspace.sandbox,
+        container_id=workspace_path,
+    )
+
+    cutoff = checkpoint_datetime(checkpoint)
+    await db.execute(
+        update(MessageModel)
+        .where(MessageModel.session_id == session_id, MessageModel.created_at > cutoff)
+        .values(reverted=True)
+    )
+    await db.execute(
+        update(ChangeRecord)
+        .where(ChangeRecord.session_id == session_id, ChangeRecord.created_at > cutoff)
+        .values(status="reverted")
+    )
+    await db.commit()
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "checkpoint_id": checkpoint_id,
+        "restored": restored,
+    }
+
+
+@router.get("/{session_id}/changes", response_model=list[ChangeRecordResponse])
+async def list_changes(
+    session_id: str,
+    current_session: str = Depends(get_current_session),
+    db: AsyncSession = Depends(get_db_session),
+) -> list[ChangeRecordResponse]:
+    ensure_session_ownership(session_id, current_session)
+    await load_session_or_404(db, session_id)
+    rows = (
+        (
+            await db.execute(
+                select(ChangeRecord)
+                .where(ChangeRecord.session_id == session_id)
+                .order_by(ChangeRecord.created_at.desc(), ChangeRecord.id.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        ChangeRecordResponse(
+            id=row.id,
+            path=row.path,
+            operation=row.operation,  # type: ignore[arg-type]
+            added=row.added,
+            deleted=row.deleted,
+            status=row.status,  # type: ignore[arg-type]
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
 @router.delete("/{session_id}")
 async def delete_session(
     session_id: str,
@@ -197,5 +296,6 @@ async def delete_session(
     index = request.app.state.repo_indexes.pop(session_id, None)
     if index is not None:
         index.cancel_build()
+    request.app.state.checkpoints.delete_session(session_id)
 
     return {"ok": True, "session_id": session_id}

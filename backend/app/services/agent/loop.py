@@ -19,7 +19,9 @@ from uuid import uuid4
 
 from app.core.events import (
     BaseSSEEvent,
+    ChangeSetProposedEvent,
     DoneEvent,
+    FileChangedEvent,
     MessageDeltaEvent,
     PatchProposedEvent,
     PlanUpdateEvent,
@@ -28,10 +30,10 @@ from app.core.events import (
 )
 from app.services.agent.context import truncate_messages
 from app.services.agent.mock_provider import MockProvider
-from app.services.agent.pending import PendingPatchRegistry
+from app.services.agent.pending import PendingChangeSetRegistry, PendingPatchRegistry
 from app.services.agent.plan import PlanState, apply_update, plan_from_json
 from app.services.agent.provider import LLMProvider, ToolCallChunk
-from app.services.agent.tools import ToolRegistry, ToolResult
+from app.services.agent.tools import EDIT_TOOL_NAMES, ToolRegistry, ToolResult
 from app.services.permissions import normalize_permission_mode
 from app.services.repo_index import RepoIndex
 from app.services.sandbox import SandboxService
@@ -41,6 +43,7 @@ MAX_TOKENS_DEFAULT = 200000
 PATCH_APPROVAL_TIMEOUT_SECONDS = 120.0
 
 REJECTED_PATCH_SUMMARY = "user rejected the patch"
+REJECTED_CHANGE_SET_SUMMARY = "user rejected the change set"
 
 
 class RecentToolCallTracker:
@@ -115,8 +118,9 @@ class AgentLoop:
 - 所有路径必须是 workspace 下的相对路径，不要使用绝对路径或 ..
 - 严格遵守当前权限模式：只读模式下不要尝试写入或执行命令，也不要反复重试被拒绝的调用
 - 检索代码优先使用 search_text / find_symbols / search_files；search 是旧版文本检索别名
-- 一次工具调用只处理一个文件的修改
-- 如果需要修改多个文件，依次调用工具
+- 新建文件或整文件重写用 write_file；删除文件用 delete_file；修改多个已有文件用 apply_patch（单批次 1–10 个文件）
+- write_patch 仅用于单个文件的精确替换；多文件任务不要拆成多次 write_patch
+- 删除操作永远需要用户确认；不要重复提交被拒绝的变更
 - 使用中文回复用户
 """
 
@@ -127,12 +131,14 @@ class AgentLoop:
         sandbox: SandboxService | None = None,
         history: list[dict] | None = None,
         pending_patches: PendingPatchRegistry | None = None,
+        pending_change_sets: PendingChangeSetRegistry | None = None,
     ) -> None:
         self.provider = provider
         self.tools = tools
         self.sandbox = sandbox
         self.history = history or []
         self.pending_patches = pending_patches
+        self.pending_change_sets = pending_change_sets
 
     async def run_stream(
         self,
@@ -283,6 +289,26 @@ class AgentLoop:
                             )
                     else:
                         result = preview
+                elif tool_name in EDIT_TOOL_NAMES:
+                    result_holder: list[ToolResult] = []
+                    async for change_event in self._edit_tool_events(
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        tools=tools,
+                        sandbox=sandbox,
+                        workspace_path=session_workspace_path,
+                        permission_mode=permission_mode,
+                        repo_index=repo_index,
+                        session_id=session_id,
+                        timeout=patch_approval_timeout,
+                        holder=result_holder,
+                    ):
+                        yield change_event
+                    result = (
+                        result_holder[0]
+                        if result_holder
+                        else ToolResult(ok=False, summary="edit tool produced no result")
+                    )
                 else:
                     result = await tools.call(
                         tool_name,
@@ -339,6 +365,148 @@ class AgentLoop:
         )
 
     # --------------------------------------------------------------- internal
+
+    async def _edit_tool_events(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tools: ToolRegistry,
+        sandbox: SandboxService,
+        workspace_path: str,
+        permission_mode: str,
+        repo_index: RepoIndex | None,
+        session_id: str,
+        timeout: float,
+        holder: list[ToolResult],
+    ) -> AsyncIterator[BaseSSEEvent]:
+        """编辑类工具的完整生命周期：预览 → 提案/自动 → 决议 → 原子落盘。"""
+        preview = await tools.call(
+            tool_name,
+            arguments,
+            sandbox,
+            workspace_path,
+            dry_run=True,
+            permission_mode=permission_mode,
+            repo_index=repo_index,
+        )
+        files = (preview.extra or {}).get("files") if preview.ok and preview.extra else None
+        if not preview.ok or not isinstance(files, list) or not files:
+            holder.append(preview)
+            return
+
+        change_set_id = str(uuid4())
+        mode = normalize_permission_mode(permission_mode)
+        is_delete = tool_name == "delete_file"
+
+        # auto：非删除操作直接落盘，并发出只读摘要卡片。
+        if mode == "auto" and not is_delete:
+            result = await tools.call(
+                tool_name,
+                _with_expected(arguments, files),
+                sandbox,
+                workspace_path,
+                permission_mode=permission_mode,
+                repo_index=repo_index,
+            )
+            yield ChangeSetProposedEvent(
+                change_set_id=change_set_id,
+                files=files,
+                auto=True,
+                auto_applied=result.ok,
+            )
+            if result.ok:
+                for entry in files:
+                    yield FileChangedEvent(
+                        path=str(entry.get("path") or ""),
+                        operation=_event_operation(entry),
+                    )
+            holder.append(result)
+            return
+
+        if self.pending_change_sets is None:
+            holder.append(preview)
+            return
+
+        # approval（删除在 auto 下同样走审批）。
+        self.pending_change_sets.register(
+            change_set_id, session_id=session_id, files=files
+        )
+        yield ChangeSetProposedEvent(
+            change_set_id=change_set_id, files=files, auto_applied=False
+        )
+        decisions = await self.pending_change_sets.wait(change_set_id, timeout=timeout)
+
+        accepted = [
+            entry for entry in files if decisions.get(str(entry.get("path")), False)
+        ]
+        rejected = [
+            entry for entry in files if not decisions.get(str(entry.get("path")), False)
+        ]
+
+        if not accepted:
+            result = ToolResult(
+                ok=False,
+                summary=REJECTED_CHANGE_SET_SUMMARY,
+                details="用户拒绝了该批次，请重新规划或说明原因。",
+                extra={
+                    "change_set_id": change_set_id,
+                    "rejected": True,
+                    "changes": [_rejected_change(entry) for entry in files],
+                },
+            )
+            self.pending_change_sets.complete(
+                change_set_id,
+                {
+                    "applied": [],
+                    "rejected": [str(entry.get("path")) for entry in files],
+                    "failed": [],
+                },
+            )
+            self.pending_change_sets.discard(change_set_id)
+            holder.append(result)
+            return
+
+        apply_args = _filtered_edit_args(tool_name, arguments, files, accepted)
+        result = await tools.call(
+            tool_name,
+            _with_expected(apply_args, accepted),
+            sandbox,
+            workspace_path,
+            permission_mode=permission_mode,
+            repo_index=repo_index,
+        )
+
+        extra = result.extra if result.extra is not None else {}
+        changes = list(extra.get("changes") or [])
+        if rejected:
+            changes.extend(_rejected_change(entry) for entry in rejected)
+        extra["changes"] = changes
+        extra["change_set_id"] = change_set_id
+        result.extra = extra
+        if rejected:
+            rejected_paths = "、".join(str(entry.get("path")) for entry in rejected)
+            result.summary = f"{result.summary}；已拒绝：{rejected_paths}"
+
+        applied_paths = [str(entry.get("path")) for entry in accepted] if result.ok else []
+        failed_paths = [] if result.ok else [str(entry.get("path")) for entry in accepted]
+        if result.ok:
+            for entry in accepted:
+                yield FileChangedEvent(
+                    path=str(entry.get("path") or ""),
+                    operation=_event_operation(entry),
+                )
+
+        self.pending_change_sets.complete(
+            change_set_id,
+            {
+                "applied": applied_paths,
+                "rejected": [str(entry.get("path")) for entry in rejected],
+                "failed": failed_paths,
+            },
+        )
+        self.pending_change_sets.discard(change_set_id)
+        holder.append(result)
 
     def _handle_plan_update(
         self, arguments: dict[str, Any], current: PlanState | None
@@ -439,6 +607,58 @@ class AgentLoop:
         messages.extend(copy.deepcopy(self.history))
         messages.append({"role": "user", "content": user_message})
         return messages
+
+
+def _with_expected(arguments: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """把预览阶段的 sha/exists 附加为工具内部参数，用于落盘前冲突检测。"""
+    data = dict(arguments)
+    data["_expected"] = {
+        str(entry.get("path")): {
+            "sha": entry.get("sha"),
+            "exists": bool(entry.get("exists")),
+        }
+        for entry in entries
+    }
+    return data
+
+
+def _filtered_edit_args(
+    tool_name: str,
+    arguments: dict[str, Any],
+    files: list[dict[str, Any]],
+    accepted: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """apply_patch 只把被接受的子集传给工具；单文件工具原样返回。"""
+    if tool_name != "apply_patch":
+        return dict(arguments)
+    raw_files = arguments.get("files")
+    if not isinstance(raw_files, list):
+        return dict(arguments)
+    selected: list[Any] = []
+    for entry in accepted:
+        index = entry.get("index")
+        if isinstance(index, int) and 0 <= index < len(raw_files):
+            selected.append(raw_files[index])
+            continue
+        for item in raw_files:
+            if isinstance(item, dict) and str(item.get("path") or "") == str(entry.get("path")):
+                selected.append(item)
+                break
+    return {"files": selected}
+
+
+def _rejected_change(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": str(entry.get("path") or ""),
+        "operation": str(entry.get("operation") or "update"),
+        "added": 0,
+        "deleted": 0,
+        "status": "rejected",
+    }
+
+
+def _event_operation(entry: dict[str, Any]) -> str:
+    return "delete" if entry.get("operation") == "delete" else "write"
 
 
 def _render_patch_diff(path: str, before: str, after: str) -> str:

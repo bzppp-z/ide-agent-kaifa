@@ -4,6 +4,7 @@ import type { KeyboardEvent } from "react";
 import type { ChatItem } from "../stores/useChatStore";
 import { useChatStore } from "../stores/useChatStore";
 import { useSessionStore } from "../stores/useSessionStore";
+import { ChangeSetCard } from "./ChangeSetCard";
 import { PatchDiff } from "./PatchDiff";
 import { PlanCard } from "./PlanCard";
 import { SseMessage } from "./SseMessage";
@@ -45,6 +46,9 @@ function ChatEventView({
 
     case "patch":
       return <PatchDiff item={item} />;
+
+    case "change_set":
+      return <ChangeSetCard item={item} />;
 
     case "output":
       return (

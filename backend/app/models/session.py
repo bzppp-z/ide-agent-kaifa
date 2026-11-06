@@ -19,6 +19,8 @@ class Session(Base):
     permission_mode: Mapped[str] = mapped_column(String(16), default="approval")
     # 最新任务计划快照（PlanState 的 JSON）
     plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 最近一次 run 对应的检查点 id（用于检查点入口展示）
+    last_checkpoint_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # 历史对话的结构化摘要（超限压缩后写入）
     summary_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

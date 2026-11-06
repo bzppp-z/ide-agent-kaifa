@@ -23,8 +23,9 @@ from app.api.terminal import router as terminal_router
 from app.core.config import Settings, get_settings
 from app.db import SessionLocal, engine, init_db
 from app.services.agent.mock_provider import MockProvider
-from app.services.agent.pending import PendingPatchRegistry
+from app.services.agent.pending import PendingChangeSetRegistry, PendingPatchRegistry
 from app.services.agent.provider import DeepSeekProvider
+from app.services.checkpoints import CheckpointService
 from app.services.repo_index import RepoIndex
 from app.services.sandbox import SandboxService
 from app.services.workspace import WorkspaceService
@@ -51,6 +52,11 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     sandbox = SandboxService(settings.workspace_root_path)
+    checkpoints = CheckpointService(
+        settings.workspace_root_path,
+        sandbox=sandbox,
+        max_checkpoints=settings.max_checkpoints_per_session,
+    )
     repo_indexes: dict[str, RepoIndex] = {}
     workspace = WorkspaceService(
         sandbox,
@@ -59,6 +65,7 @@ async def lifespan(app: FastAPI):
         repo_indexes=repo_indexes,
         repo_index_max_files=settings.repo_index_max_files,
         repo_index_max_results=settings.repo_index_max_results,
+        checkpoints=checkpoints,
     )
 
     app.state.settings = settings
@@ -70,6 +77,8 @@ async def lifespan(app: FastAPI):
     app.state.provider = build_provider(settings)
     app.state.loop_states = {}
     app.state.pending_patches = PendingPatchRegistry()
+    app.state.pending_change_sets = PendingChangeSetRegistry()
+    app.state.checkpoints = checkpoints
 
     idle_task = asyncio.create_task(workspace.run_idle_reclaim_loop(), name="devflow-idle-reclaim")
     app.state.idle_reclaim_task = idle_task

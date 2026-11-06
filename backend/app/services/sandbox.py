@@ -25,6 +25,7 @@ container_id / workspace_path 必须落在 ``WORKSPACE_ROOT_DIR`` 内。
 
 import asyncio
 import contextlib
+import hashlib
 import shutil
 import sys
 from pathlib import Path
@@ -147,6 +148,24 @@ class SandboxService:
         target = workspace / validate_workspace_path(relative_path)
         return target.read_text(encoding="utf-8")
 
+    def delete_file(self, container_id: str, relative_path: str) -> None:
+        """删除单个文件；目录、绝对路径与越界路径一律拒绝。"""
+        workspace = self._resolve_container(container_id)
+        target = workspace / validate_workspace_path(relative_path)
+        if not target.exists():
+            raise FileNotFoundError(f"file does not exist in workspace: {relative_path!r}")
+        if target.is_dir():
+            raise ValueError(f"path is a directory, refusing to delete: {relative_path!r}")
+        target.unlink()
+
+    def path_hash(self, container_id: str, relative_path: str) -> str | None:
+        """返回文件内容的 sha256；文件不存在（或不是文件）时返回 None。"""
+        workspace = self._resolve_container(container_id)
+        target = workspace / validate_workspace_path(relative_path)
+        if not target.is_file():
+            return None
+        return hashlib.sha256(target.read_bytes()).hexdigest()
+
     def list_files(self, container_id: str, relative_path: str = "") -> list[dict[str, Any]]:
         workspace = self._resolve_container(container_id)
         if relative_path.strip():
@@ -173,6 +192,7 @@ class SandboxService:
                     "path": f"{relative}/{entry.name}" if relative else entry.name,
                     "type": entry_type,
                     "size": size,
+                    "mtime": entry.stat().st_mtime,
                 }
             )
         return entries

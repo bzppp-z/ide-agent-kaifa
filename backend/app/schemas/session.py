@@ -23,6 +23,25 @@ class SessionResponse(BaseModel):
     created_at: datetime
     permission_mode: Literal["readonly", "approval", "auto"] = "approval"
     plan: dict[str, Any] | None = None
+    last_checkpoint_id: str | None = None
+
+
+class CheckpointResponse(BaseModel):
+    id: str
+    session_id: str
+    created_at: datetime
+    user_message: str = ""
+    file_count: int = 0
+
+
+class ChangeRecordResponse(BaseModel):
+    id: UUID
+    path: str
+    operation: Literal["create", "update", "delete"]
+    added: int = 0
+    deleted: int = 0
+    status: Literal["applied", "rejected", "reverted", "failed"]
+    created_at: datetime
 
 
 class SessionPreferencesUpdate(BaseModel):

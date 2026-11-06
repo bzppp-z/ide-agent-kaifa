@@ -1,6 +1,8 @@
 import { useSessionStore } from "../stores/useSessionStore";
 import { SseParser } from "./sseParser";
 import type {
+  ChangeRecord,
+  ChangeSetDecisionResult,
   FileContent,
   FileWriteResult,
   LocalBrowseResponse,
@@ -238,6 +240,25 @@ export function respondPatch(
       body: JSON.stringify({ accepted }),
     },
   );
+}
+
+/** 提交多文件变更批次的逐文件决议（path -> 是否接受）。 */
+export function respondChangeSet(
+  changeSetId: string,
+  decisions: Record<string, boolean>,
+): Promise<ChangeSetDecisionResult> {
+  return apiFetch<ChangeSetDecisionResult>(
+    `/agent/change-set/${encodeURIComponent(changeSetId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ decisions }),
+    },
+  );
+}
+
+/** 会话变更清单（Phase 6 的变更面板使用）。 */
+export function listChanges(sessionId: string): Promise<ChangeRecord[]> {
+  return apiFetch<ChangeRecord[]>(`/sessions/${encodeURIComponent(sessionId)}/changes`);
 }
 
 /**

@@ -71,6 +71,7 @@ async def _migrate_sqlite(conn: AsyncConnection) -> None:
     await add_missing("sessions", "permission_mode", "permission_mode VARCHAR DEFAULT 'approval'")
     await add_missing("sessions", "plan_json", "plan_json TEXT")
     await add_missing("sessions", "summary_text", "summary_text TEXT")
+    await add_missing("sessions", "last_checkpoint_id", "last_checkpoint_id VARCHAR(36)")
     await add_missing("messages", "reverted", "reverted BOOLEAN DEFAULT 0")
 
 

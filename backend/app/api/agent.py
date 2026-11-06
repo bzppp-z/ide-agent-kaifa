@@ -38,10 +38,16 @@ from app.core.events import (
     ToolResultEvent,
 )
 from app.db import get_db_session, utcnow
+from app.models.change import ChangeRecord
 from app.models.message import Message as MessageModel
 from app.models.session import Session as SessionModel
 from app.models.tool_call import ToolCall as ToolCallModel
-from app.schemas.agent import AgentRunRequest, AgentRunResponse, PatchDecisionRequest
+from app.schemas.agent import (
+    AgentRunRequest,
+    AgentRunResponse,
+    ChangeSetDecisionRequest,
+    PatchDecisionRequest,
+)
 from app.services.agent.loop import AgentLoop
 from app.services.agent.provider import LLMProvider
 from app.services.agent.tools import ToolRegistry
@@ -79,6 +85,11 @@ async def run_agent(
     )
     await db.commit()
 
+    # 每次 run 开始创建检查点（只写元数据，文件快照在写入前惰性捕获）。
+    checkpoint = request.app.state.checkpoints.create(session_id, body.message)
+    session_row.last_checkpoint_id = checkpoint["id"]
+    await db.commit()
+
     run_id = str(uuid4())
     queue: asyncio.Queue = asyncio.Queue()
     loop_states: dict[str, dict] = request.app.state.loop_states
@@ -103,6 +114,7 @@ async def run_agent(
             provider=provider,
             permission_mode=session_row.permission_mode or "approval",
             initial_plan=_parse_plan(session_row),
+            checkpoint_id=checkpoint["id"],
         ),
         name=f"devflow-agent-{session_id}",
     )
@@ -174,7 +186,10 @@ async def stop_run(
     registry = getattr(request.app.state, "pending_patches", None)
     if registry is not None:
         registry.discard_all(session_id)
-        state["task"] = None
+    change_sets = getattr(request.app.state, "pending_change_sets", None)
+    if change_sets is not None:
+        change_sets.discard_all(session_id)
+    state["task"] = None
 
     return {"ok": True, "stopped": True}
 
@@ -203,6 +218,46 @@ async def respond_patch(
     return {"ok": True, "patch_id": patch_id, "accepted": body.accepted}
 
 
+@router.patch("/agent/change-set/{change_set_id}")
+async def respond_change_set(
+    change_set_id: str,
+    body: ChangeSetDecisionRequest,
+    request: Request,
+    current_session: str = Depends(get_current_session),
+) -> dict:
+    """逐文件决议；返回 loop 落盘后的 applied/rejected/failed 路径列表。"""
+    registry = request.app.state.pending_change_sets
+    pending = registry.get(change_set_id)
+    if pending is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="change set not found or already resolved",
+        )
+    if pending.session_id != current_session:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="change set does not belong to this session",
+        )
+
+    registry.resolve(change_set_id, body.decisions)
+    result = await registry.wait_result(change_set_id, timeout=5.0, pending=pending)
+    registry.discard(change_set_id)
+
+    if result is None:
+        # 落盘尚未完成：按决议状态返回，前端可继续等待 SSE 的 tool.result。
+        known = {str(item.get("path")) for item in pending.files}
+        accepted = [
+            path for path, value in body.decisions.items() if path in known and value
+        ]
+        rejected = [
+            path for path, value in body.decisions.items() if path in known and not value
+        ]
+        rejected.extend(known.difference(body.decisions.keys()))
+        result = {"applied": [], "rejected": rejected, "failed": accepted}
+
+    return {"ok": True, "change_set_id": change_set_id, **result}
+
+
 # ---------------------------------------------------------------- background loop
 
 
@@ -218,15 +273,21 @@ async def _drive_agent_loop(
     provider: LLMProvider | None = None,
     permission_mode: str = "approval",
     initial_plan: dict | None = None,
+    checkpoint_id: str | None = None,
 ) -> None:
     """后台跑 AgentLoop，把每个事件放进 queue；结束时放哨兵 None。"""
     try:
         loop = AgentLoop(
             provider=provider or app.state.provider,
-            tools=ToolRegistry(),
+            tools=ToolRegistry(
+                checkpoints=getattr(app.state, "checkpoints", None),
+                session_id=session_id,
+                checkpoint_id=checkpoint_id,
+            ),
             sandbox=app.state.sandbox,
             history=history,
             pending_patches=app.state.pending_patches,
+            pending_change_sets=getattr(app.state, "pending_change_sets", None),
         )
         settings = app.state.settings
         async for event in loop.run_stream(
@@ -347,6 +408,27 @@ async def _persist_event(
                     created_at=utcnow(),
                 )
             )
+            # 编辑类工具把逐文件变更记录放在 result.extra["changes"]；
+            # 工具层不碰 DB，落库统一放在这里。
+            for change in _extract_changes(result):
+                operation = str(change.get("operation") or "update")
+                if operation not in ("create", "update", "delete"):
+                    operation = "update"
+                status = str(change.get("status") or "applied")
+                if status == "conflict":
+                    status = "failed"
+                db.add(
+                    ChangeRecord(
+                        id=str(uuid4()),
+                        session_id=session_id,
+                        path=str(change.get("path") or ""),
+                        operation=operation,
+                        added=int(change.get("added") or 0),
+                        deleted=int(change.get("deleted") or 0),
+                        status=status,
+                        created_at=utcnow(),
+                    )
+                )
             await db.commit()
             return
 
@@ -390,3 +472,13 @@ async def _persist_event(
                 db, session_id, run_id, event.total_tokens, event.total_steps
             )
             return
+
+
+def _extract_changes(result: dict) -> list[dict]:
+    extra = result.get("extra")
+    if not isinstance(extra, dict):
+        return []
+    changes = extra.get("changes")
+    if not isinstance(changes, list):
+        return []
+    return [change for change in changes if isinstance(change, dict) and change.get("path")]

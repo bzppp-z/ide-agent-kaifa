@@ -60,6 +60,14 @@ export interface PatchDecisionResult {
   accepted: boolean;
 }
 
+export interface ChangeSetDecisionResult {
+  ok: true;
+  change_set_id: string;
+  applied: string[];
+  rejected: string[];
+  failed: string[];
+}
+
 /** 用户自定义模型 Provider（api_key 只返回掩码）。 */
 export interface Provider {
   id: string;
@@ -113,6 +121,11 @@ export interface ChangeFile {
   before?: string;
   after?: string;
   diff?: string;
+  /** 预览阶段的内容哈希，用于落盘前冲突检测。 */
+  sha?: string;
+  exists?: boolean;
+  note?: string | null;
+  index?: number;
 }
 
 export interface Checkpoint {
@@ -165,6 +178,9 @@ export type SSEEvent =
       type: "change_set.proposed";
       change_set_id: string;
       files: ChangeFile[];
+      /** auto 模式无需审批；auto_applied 表示是否已成功落盘。 */
+      auto?: boolean;
+      auto_applied?: boolean;
     }
   | {
       type: "command.proposed";

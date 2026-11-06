@@ -33,6 +33,7 @@ class WorkspaceService:
         repo_indexes: dict[str, RepoIndex] | None = None,
         repo_index_max_files: int = 10000,
         repo_index_max_results: int = 50,
+        checkpoints=None,
     ) -> None:
         self.sandbox = sandbox
         self.session_factory = session_factory
@@ -41,6 +42,7 @@ class WorkspaceService:
         self.repo_indexes = repo_indexes if repo_indexes is not None else {}
         self.repo_index_max_files = repo_index_max_files
         self.repo_index_max_results = repo_index_max_results
+        self.checkpoints = checkpoints
 
     async def ensure_container(self, session_id: str, demo_repo: str | None = None) -> str:
         """幂等创建会话 workspace 并写入 demo repo，返回 workspace 绝对路径。"""
@@ -148,6 +150,10 @@ class WorkspaceService:
 
             if reclaimed:
                 await db.commit()
+
+        if self.checkpoints is not None:
+            for session_id in reclaimed:
+                self.checkpoints.delete_session(session_id)
 
         for session_id in reclaimed:
             index = self.repo_indexes.pop(session_id, None)

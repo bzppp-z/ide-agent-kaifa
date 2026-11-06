@@ -9,14 +9,19 @@
 匹配，防止模型用工具产出超大结果占满 token。
 """
 
+import difflib
+import hashlib
 import re
 import time
+from pathlib import PurePosixPath
 from typing import Any
 
 from pydantic import BaseModel
 
+from app.core.config import get_settings
 from app.core.security import validate_workspace_path
-from app.services.permissions import can_write, normalize_permission_mode
+from app.services.checkpoints import CheckpointService
+from app.services.permissions import can_delete, can_write, normalize_permission_mode
 from app.services.repo_index import (
     MAX_SYMBOL_FILE_BYTES,
     SKIP_DIR_NAMES,
@@ -33,6 +38,12 @@ MAX_SEARCH_FILE_BYTES = MAX_SYMBOL_FILE_BYTES
 MAX_AGENT_SEARCH_RESULTS = 50
 
 TRUNCATED_MARKER = "[truncated]"
+
+_SETTINGS = get_settings()
+MAX_FILES_PER_CHANGE_SET = _SETTINGS.max_files_per_change_set
+MAX_AGENT_WRITE_BYTES = _SETTINGS.max_agent_write_bytes
+
+EDIT_TOOL_NAMES = ("write_file", "delete_file", "apply_patch")
 
 
 class ToolResult(BaseModel):
@@ -150,10 +161,62 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
         ["path", "search", "replace"],
     ),
+    _function_schema(
+        "write_file",
+        "新建文件或整文件写入。文件已存在时必须显式传 overwrite=true。",
+        {
+            "path": {"type": "string", "description": "workspace 相对文件路径"},
+            "content": {"type": "string", "description": "文件的完整内容"},
+            "overwrite": {"type": "boolean", "description": "覆盖已存在文件，默认 false"},
+        },
+        ["path", "content"],
+    ),
+    _function_schema(
+        "delete_file",
+        "删除 workspace 内的单个文件（目录不可删除）；删除永远需要用户确认。",
+        {"path": {"type": "string", "description": "workspace 相对文件路径"}},
+        ["path"],
+    ),
+    _function_schema(
+        "apply_patch",
+        (
+            "一次批量修改 1–10 个文件。每项提供 path + search/replace（唯一匹配），"
+            "或 path + before/after（整文件替换，before 必须与当前内容一致）。"
+        ),
+        {
+            "files": {
+                "type": "array",
+                "description": "文件变更数组，1–10 项",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "workspace 相对文件路径"},
+                        "search": {"type": "string", "description": "要唯一匹配的原文"},
+                        "replace": {"type": "string", "description": "替换后的文本"},
+                        "before": {"type": "string", "description": "整文件替换前的原文"},
+                        "after": {"type": "string", "description": "整文件替换后的全文"},
+                    },
+                    "required": ["path"],
+                },
+            }
+        },
+        ["files"],
+    ),
 ]
 
 
 class ToolRegistry:
+    def __init__(
+        self,
+        checkpoints: CheckpointService | None = None,
+        session_id: str | None = None,
+        checkpoint_id: str | None = None,
+    ) -> None:
+        # 检查点服务由 main / AgentLoop 注入；工具层不直接访问数据库。
+        self.checkpoints = checkpoints
+        self.session_id = session_id
+        self.checkpoint_id = checkpoint_id
+
     def to_schema(self) -> list[dict[str, Any]]:
         """返回 OpenAI function calling 格式的工具列表（深拷贝，防止调用方修改）。"""
         return [schema.copy() for schema in TOOL_SCHEMAS]
@@ -191,6 +254,33 @@ class ToolRegistry:
             )
         elif name == "write_patch":
             result = self._write_patch(
+                args,
+                sandbox,
+                workspace_path,
+                dry_run=dry_run,
+                permission_mode=permission_mode,
+                repo_index=repo_index,
+            )
+        elif name == "write_file":
+            result = self._write_file(
+                args,
+                sandbox,
+                workspace_path,
+                dry_run=dry_run,
+                permission_mode=permission_mode,
+                repo_index=repo_index,
+            )
+        elif name == "delete_file":
+            result = self._delete_file(
+                args,
+                sandbox,
+                workspace_path,
+                dry_run=dry_run,
+                permission_mode=permission_mode,
+                repo_index=repo_index,
+            )
+        elif name == "apply_patch":
+            result = self._apply_patch(
                 args,
                 sandbox,
                 workspace_path,
@@ -450,6 +540,430 @@ class ToolRegistry:
             details=f"replaced 1 occurrence in {relative}",
             extra={"path": relative, "before": before, "after": after, "applied": True},
         )
+
+    # ------------------------------------------------- batch edit tools
+
+    def _write_file(
+        self,
+        args: dict[str, Any],
+        sandbox: SandboxService,
+        workspace_path: str,
+        dry_run: bool = False,
+        permission_mode: str = "approval",
+        repo_index: RepoIndex | None = None,
+    ) -> ToolResult:
+        if not can_write(permission_mode):
+            return ToolResult(
+                ok=False,
+                summary="当前为只读模式，禁止写入",
+                details=f"permission_mode={normalize_permission_mode(permission_mode)}",
+            )
+        try:
+            raw_path = _require_str_arg(args, "path")
+            relative = validate_workspace_path(raw_path)
+            content = _require_str_arg(args, "content")
+            overwrite = _bool_arg(args, "overwrite", False)
+            existing = _read_existing(sandbox, workspace_path, relative)
+            if existing is not None and not overwrite:
+                return ToolResult(
+                    ok=False,
+                    summary=f"file already exists: {relative}",
+                    details="如需整文件覆盖，请传 overwrite=true。",
+                )
+            entry = _build_entry(
+                sandbox,
+                workspace_path,
+                relative,
+                operation="update" if existing is not None else "create",
+                before=existing or "",
+                after=content,
+                exists=existing is not None,
+                index=0,
+            )
+        except (ValueError, FileNotFoundError, UnicodeDecodeError, OSError) as exc:
+            return ToolResult(ok=False, summary=f"无法准备变更：{exc}")
+
+        return self._finish_edits(
+            args, [entry], sandbox, workspace_path, dry_run, repo_index
+        )
+
+    def _delete_file(
+        self,
+        args: dict[str, Any],
+        sandbox: SandboxService,
+        workspace_path: str,
+        dry_run: bool = False,
+        permission_mode: str = "approval",
+        repo_index: RepoIndex | None = None,
+    ) -> ToolResult:
+        if not can_delete(permission_mode):
+            return ToolResult(
+                ok=False,
+                summary="当前为只读模式，禁止删除",
+                details=f"permission_mode={normalize_permission_mode(permission_mode)}",
+            )
+        try:
+            raw_path = _require_str_arg(args, "path")
+            relative = validate_workspace_path(raw_path)
+            before = sandbox.read_file(workspace_path, relative)
+            if len(before.encode("utf-8")) > MAX_AGENT_WRITE_BYTES:
+                return ToolResult(ok=False, summary=f"文件超过 1MB 上限，拒绝删除：{relative}")
+            entry = _build_entry(
+                sandbox,
+                workspace_path,
+                relative,
+                operation="delete",
+                before=before,
+                after="",
+                exists=True,
+                index=0,
+            )
+            info = _file_info(sandbox, workspace_path, relative)
+            entry["size"] = int(info.get("size") or 0) if info else len(before.encode("utf-8"))
+            entry["mtime"] = info.get("mtime") if info else None
+        except (ValueError, FileNotFoundError, UnicodeDecodeError, OSError) as exc:
+            return ToolResult(ok=False, summary=f"无法准备删除：{exc}")
+
+        return self._finish_edits(
+            args, [entry], sandbox, workspace_path, dry_run, repo_index
+        )
+
+    def _apply_patch(
+        self,
+        args: dict[str, Any],
+        sandbox: SandboxService,
+        workspace_path: str,
+        dry_run: bool = False,
+        permission_mode: str = "approval",
+        repo_index: RepoIndex | None = None,
+    ) -> ToolResult:
+        if not can_write(permission_mode):
+            return ToolResult(
+                ok=False,
+                summary="当前为只读模式，禁止批量修改",
+                details=f"permission_mode={normalize_permission_mode(permission_mode)}",
+            )
+        try:
+            raw_files = args.get("files")
+            if not isinstance(raw_files, list) or not raw_files:
+                return ToolResult(ok=False, summary="files 必须是非空数组")
+            if len(raw_files) > MAX_FILES_PER_CHANGE_SET:
+                return ToolResult(
+                    ok=False,
+                    summary=f"单批次最多修改 {MAX_FILES_PER_CHANGE_SET} 个文件，本次 {len(raw_files)} 个",
+                )
+
+            entries: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for index, item in enumerate(raw_files):
+                if not isinstance(item, dict):
+                    return ToolResult(ok=False, summary=f"files[{index}] 必须是对象")
+                relative = validate_workspace_path(_require_str_arg(item, "path"))
+                if relative in seen:
+                    return ToolResult(ok=False, summary=f"批次内路径重复：{relative}")
+                seen.add(relative)
+                existing = _read_existing(sandbox, workspace_path, relative)
+
+                if "search" in item:
+                    search = _string_value(item, "search")
+                    replace = _string_value(item, "replace")
+                    if not search:
+                        return ToolResult(ok=False, summary=f"files[{index}] 的 search 不能为空")
+                    if existing is None:
+                        return ToolResult(ok=False, summary=f"file not found: {relative}")
+                    occurrences = existing.count(search)
+                    if occurrences == 0:
+                        return ToolResult(ok=False, summary=f"pattern not found in {relative}")
+                    if occurrences > 1:
+                        return ToolResult(
+                            ok=False,
+                            summary=f"ambiguous match: pattern occurs {occurrences} times in {relative}",
+                        )
+                    before, after = existing, existing.replace(search, replace, 1)
+                    operation = "update"
+                else:
+                    before_arg = _string_value(item, "before")
+                    after_arg = _string_value(item, "after")
+                    if "after" not in item:
+                        return ToolResult(
+                            ok=False, summary=f"files[{index}] 需要 search/replace 或 before/after"
+                        )
+                    if existing is None:
+                        if before_arg:
+                            return ToolResult(
+                                ok=False,
+                                summary=f"file not found: {relative}（新建时 before 必须为空）",
+                            )
+                        before, after, operation = "", after_arg, "create"
+                    else:
+                        if before_arg and before_arg != existing:
+                            return ToolResult(
+                                ok=False, summary=f"before 与 {relative} 当前内容不一致"
+                            )
+                        before, after, operation = existing, after_arg, "update"
+
+                entries.append(
+                    _build_entry(
+                        sandbox,
+                        workspace_path,
+                        relative,
+                        operation=operation,
+                        before=before,
+                        after=after,
+                        exists=operation != "create",
+                        index=index,
+                    )
+                )
+        except (ValueError, FileNotFoundError, UnicodeDecodeError, OSError) as exc:
+            return ToolResult(ok=False, summary=f"无法准备变更：{exc}")
+
+        return self._finish_edits(
+            args, entries, sandbox, workspace_path, dry_run, repo_index
+        )
+
+    def _finish_edits(
+        self,
+        args: dict[str, Any],
+        entries: list[dict[str, Any]],
+        sandbox: SandboxService,
+        workspace_path: str,
+        dry_run: bool,
+        repo_index: RepoIndex | None,
+    ) -> ToolResult:
+        if dry_run:
+            return _preview_result(entries)
+        return self._apply_edits(args, entries, sandbox, workspace_path, repo_index)
+
+    def _apply_edits(
+        self,
+        args: dict[str, Any],
+        entries: list[dict[str, Any]],
+        sandbox: SandboxService,
+        workspace_path: str,
+        repo_index: RepoIndex | None,
+    ) -> ToolResult:
+        expected = args.get("_expected") if isinstance(args.get("_expected"), dict) else {}
+
+        # 冲突检测：落盘前重新读取每个文件，与预览阶段的 sha 比对。
+        for entry in entries:
+            relative = entry["path"]
+            want = expected.get(relative) if isinstance(expected, dict) else None
+            want_exists = bool(want.get("exists", entry["exists"])) if isinstance(want, dict) else entry["exists"]
+            want_sha = want.get("sha") if isinstance(want, dict) else entry.get("sha")
+            try:
+                current = _read_existing(sandbox, workspace_path, relative)
+            except UnicodeDecodeError:
+                current = None
+            current_exists = current is not None
+            current_sha = hashlib.sha256((current or "").encode("utf-8")).hexdigest()
+            if current_exists != want_exists or (want_exists and want_sha != current_sha):
+                return ToolResult(
+                    ok=False,
+                    summary=f"批次冲突：{relative} 已被修改，整批未落盘",
+                    details="文件内容与预览阶段不一致，请重新读取后再生成变更。",
+                    extra={
+                        "files": [{**item, "status": "conflict"} for item in entries],
+                        "changes": [_change_record(item, "failed") for item in entries],
+                        "conflict": True,
+                    },
+                )
+
+        # 首次捕获原内容（惰性快照），失败不影响写入但会记录日志之外的异常。
+        self._capture_checkpoints(workspace_path, [entry["path"] for entry in entries])
+
+        written: list[dict[str, Any]] = []
+        try:
+            for entry in entries:
+                if entry["operation"] == "delete":
+                    sandbox.delete_file(workspace_path, entry["path"])
+                else:
+                    sandbox.write_file(workspace_path, entry["path"], entry["after"])
+                written.append(entry)
+        except (OSError, ValueError, FileNotFoundError) as exc:
+            for entry in reversed(written):
+                try:
+                    if entry["exists"]:
+                        sandbox.write_file(workspace_path, entry["path"], entry["before"])
+                    else:
+                        sandbox.delete_file(workspace_path, entry["path"])
+                except (OSError, ValueError, FileNotFoundError):
+                    pass
+            return ToolResult(
+                ok=False,
+                summary=f"批次落盘失败，已回滚：{exc}",
+                extra={
+                    "files": [{**entry, "status": "failed"} for entry in entries],
+                    "changes": [_change_record(entry, "failed") for entry in entries],
+                    "failed": True,
+                },
+            )
+
+        if repo_index is not None:
+            for entry in entries:
+                repo_index.invalidate(entry["path"])
+
+        applied = [{**entry, "status": "applied"} for entry in entries]
+        changes = [_change_record(entry, "applied") for entry in entries]
+        summary = "已生效：" + "、".join(
+            f"{entry['operation']} {entry['path']}" for entry in entries
+        )
+        return ToolResult(
+            ok=True,
+            summary=summary,
+            details="\n".join(entry["diff"] for entry in entries),
+            extra={"files": applied, "changes": changes, "applied": True},
+        )
+
+    def _capture_checkpoints(self, workspace_path: str, relative_paths: list[str]) -> None:
+        if self.checkpoints is None or not self.session_id or not self.checkpoint_id:
+            return
+        for relative in relative_paths:
+            self.checkpoints.capture_file(
+                self.session_id,
+                self.checkpoint_id,
+                workspace_path,
+                relative,
+                workspace_path,
+            )
+
+
+def _string_value(args: dict[str, Any], key: str) -> str:
+    value = args.get(key, "")
+    return value if isinstance(value, str) else ""
+
+
+def _bool_arg(args: dict[str, Any], key: str, default: bool) -> bool:
+    value = args.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes")
+    return default
+
+
+def _read_existing(
+    sandbox: SandboxService, workspace_path: str, relative: str
+) -> str | None:
+    try:
+        return sandbox.read_file(workspace_path, relative)
+    except FileNotFoundError:
+        return None
+
+
+def _build_entry(
+    sandbox: SandboxService,
+    workspace_path: str,
+    relative: str,
+    *,
+    operation: str,
+    before: str,
+    after: str,
+    exists: bool,
+    index: int,
+) -> dict[str, Any]:
+    after_bytes = len(after.encode("utf-8"))
+    if after_bytes > MAX_AGENT_WRITE_BYTES:
+        raise ValueError(
+            f"{relative} 超过单文件 1MB 上限（{after_bytes} bytes）"
+        )
+    if len(before.encode("utf-8")) > MAX_AGENT_WRITE_BYTES:
+        raise ValueError(f"{relative} 原文件超过 1MB 上限")
+    note = None
+    if operation == "create" and not _parent_exists(sandbox, workspace_path, relative):
+        note = "将创建目录"
+    return {
+        "path": relative,
+        "operation": operation,
+        "before": before,
+        "after": after,
+        "diff": _render_patch_diff(relative, before, after),
+        "sha": hashlib.sha256(before.encode("utf-8")).hexdigest(),
+        "exists": exists,
+        "index": index,
+        "note": note,
+    }
+
+
+def _preview_result(entries: list[dict[str, Any]]) -> ToolResult:
+    lines = []
+    for entry in entries:
+        line = f"{entry['operation']} {entry['path']}"
+        if entry.get("note"):
+            line += f"（{entry['note']}）"
+        lines.append(line)
+    return ToolResult(
+        ok=True,
+        summary=f"准备 {len(entries)} 个文件变更：" + "、".join(
+            entry["path"] for entry in entries
+        ),
+        details="\n".join(lines),
+        extra={"files": entries, "applied": False},
+    )
+
+
+def _parent_exists(sandbox: SandboxService, workspace_path: str, relative: str) -> bool:
+    parts = PurePosixPath(relative).parts
+    if len(parts) <= 1:
+        return True
+    parent = str(PurePosixPath(*parts[:-1]))
+    try:
+        sandbox.list_files(workspace_path, parent)
+        return True
+    except (FileNotFoundError, ValueError, OSError):
+        return False
+
+
+def _file_info(
+    sandbox: SandboxService, workspace_path: str, relative: str
+) -> dict[str, Any] | None:
+    parts = PurePosixPath(relative).parts
+    parent = str(PurePosixPath(*parts[:-1])) if len(parts) > 1 else ""
+    try:
+        entries = sandbox.list_files(workspace_path, parent)
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    for entry in entries:
+        if entry.get("path") == relative:
+            return entry
+    return None
+
+
+def _change_record(entry: dict[str, Any], status: str) -> dict[str, Any]:
+    added, deleted = _line_stats(entry.get("before", ""), entry.get("after", ""))
+    return {
+        "path": entry["path"],
+        "operation": entry["operation"],
+        "added": added,
+        "deleted": deleted,
+        "status": status,
+    }
+
+
+def _line_stats(before: str, after: str) -> tuple[int, int]:
+    """用 difflib 统计新增/删除行数。"""
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    added = deleted = 0
+    matcher = difflib.SequenceMatcher(None, before_lines, after_lines)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "delete"):
+            deleted += i2 - i1
+        if tag in ("replace", "insert"):
+            added += j2 - j1
+    return added, deleted
+
+
+def _render_patch_diff(path: str, before: str, after: str) -> str:
+    """生成统一 diff 文本；新建/删除文件也能得到完整增删内容。"""
+    return "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+    )
 
 
 def _require_str_arg(args: dict[str, Any], key: str) -> str:

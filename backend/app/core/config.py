@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     repo_index_max_files: int = 10000
     repo_index_max_results: int = 50
 
+    # 多文件编辑：单批次最多文件数与单文件写入上限（1MB）
+    max_files_per_change_set: int = 10
+    max_agent_write_bytes: int = 1048576
+
+    # 每次会话保留的检查点数量上限
+    max_checkpoints_per_session: int = 50
+
     # 认证 / 服务
     jwt_secret: str = "change-me-in-production"
     jwt_expire_hours: int = 24

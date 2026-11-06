@@ -1,7 +1,10 @@
 import { create } from "zustand";
 
 import { formatError, runAgent, stopRun } from "../lib/api";
-import type { Message, PlanState, SSEEvent } from "../lib/types";
+import type { ChangeFile, Message, PlanState, SSEEvent } from "../lib/types";
+import { useEditorStore } from "./useEditorStore";
+import { useSessionStore } from "./useSessionStore";
+import { useWorkspaceStore } from "./useWorkspaceStore";
 
 // ------------------------------------------------------------------ chat items
 
@@ -43,6 +46,24 @@ export interface ChatPatchItem {
   status: "pending" | "accepted" | "rejected";
 }
 
+export type ChangeSetFileStatus =
+  | "pending"
+  | "applied"
+  | "rejected"
+  | "failed";
+
+export interface ChatChangeSetItem {
+  id: string;
+  kind: "change_set";
+  changeSetId: string;
+  files: ChangeFile[];
+  auto: boolean;
+  autoApplied: boolean;
+  status: "pending" | "submitting" | "done";
+  results: Record<string, ChangeSetFileStatus>;
+  error?: string | null;
+}
+
 export interface ChatOutputItem {
   id: string;
   kind: "output";
@@ -71,6 +92,7 @@ export type ChatItem =
   | ChatAssistantItem
   | ChatToolItem
   | ChatPatchItem
+  | ChatChangeSetItem
   | ChatOutputItem
   | ChatErrorItem
   | ChatDoneItem;
@@ -101,6 +123,12 @@ interface ChatState {
   setSseAbort: (controller: AbortController | null) => void;
   /** 标记某个 patch 卡片的处理结果（PatchDiff 在决议成功后调用）。 */
   setPatchStatus: (patchId: string, status: "accepted" | "rejected") => void;
+  /** 标记变更批次卡片的提交状态与逐文件结果。 */
+  setChangeSetResults: (
+    itemId: string,
+    results: Record<string, ChangeSetFileStatus>,
+    error?: string | null,
+  ) => void;
   /** 主动停止：先通知后端取消 run，再断开 SSE 并把在写消息收尾。 */
   stopStreaming: (sessionId: string) => Promise<void>;
   endStream: () => void;
@@ -159,6 +187,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   pushEvent: (event) => {
+    // file.changed 没有对应聊天气泡，直接刷新文件树/编辑器。
+    if (event.type === "file.changed") {
+      const sessionId = useSessionStore.getState().id;
+      if (sessionId) {
+        void useWorkspaceStore.getState().loadTree(sessionId);
+        const editor = useEditorStore.getState();
+        if (editor.filePath === event.path && !editor.dirty) {
+          if (event.operation === "delete") editor.close();
+          else void editor.open(sessionId, event.path);
+        }
+      }
+      return;
+    }
+
     set((state) => {
       const items = [...state.items];
 
@@ -250,6 +292,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
             after: event.after,
             diff: event.diff,
             status: "pending",
+          });
+          return { items };
+        }
+
+        case "change_set.proposed": {
+          const auto = Boolean(event.auto);
+          const status: ChangeSetFileStatus = auto
+            ? event.auto_applied
+              ? "applied"
+              : "failed"
+            : "pending";
+          const results: Record<string, ChangeSetFileStatus> = {};
+          for (const file of event.files ?? []) {
+            results[file.path] = status;
+          }
+          items.push({
+            id: nextId("change-set"),
+            kind: "change_set",
+            changeSetId: event.change_set_id,
+            files: event.files ?? [],
+            auto,
+            autoApplied: Boolean(event.auto_applied),
+            status: auto ? "done" : "pending",
+            results,
+            error: auto && !event.auto_applied ? "自动落盘失败" : null,
           });
           return { items };
         }
@@ -359,6 +426,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       items: state.items.map((item) =>
         item.kind === "patch" && item.patchId === patchId
           ? { ...item, status }
+          : item,
+      ),
+    })),
+
+  setChangeSetResults: (itemId, results, error = null) =>
+    set((state) => ({
+      items: state.items.map((item) =>
+        item.kind === "change_set" && item.id === itemId
+          ? { ...item, status: "done", results, error }
           : item,
       ),
     })),

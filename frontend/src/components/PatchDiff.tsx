@@ -8,8 +8,15 @@ import { useEditorStore } from "../stores/useEditorStore";
 import { useSessionStore } from "../stores/useSessionStore";
 import { Button } from "./ui/button";
 
-/** patch 审批卡片：左右两栏对比 + 接受/拒绝，决议后置灰防重复点击。 */
-export function PatchDiff({ item }: { item: ChatPatchItem }) {
+/** patch 审批卡片：左右两栏对比 + 接受/拒绝，决议后置灰防重复点击。
+ * compact=true 时只渲染 diff，由外层卡片负责接受/拒绝交互。 */
+export function PatchDiff({
+  item,
+  compact = false,
+}: {
+  item: ChatPatchItem;
+  compact?: boolean;
+}) {
   const setPatchStatus = useChatStore((state) => state.setPatchStatus);
   const sessionId = useSessionStore((state) => state.id);
   const [submitting, setSubmitting] = useState(false);
@@ -73,30 +80,32 @@ export function PatchDiff({ item }: { item: ChatPatchItem }) {
         </div>
       </div>
 
-      <div className="mt-2 flex items-center gap-2">
-        <Button
-          variant="brand"
-          size="sm"
-          disabled={decided || submitting}
-          onClick={() => void decide(true)}
-        >
-          接受
-        </Button>
-        <Button
-          variant="danger"
-          size="sm"
-          disabled={decided || submitting}
-          onClick={() => void decide(false)}
-        >
-          拒绝
-        </Button>
-        {submitting ? (
-          <span className="text-[10.5px] text-muted-dim">提交中…</span>
-        ) : null}
-        {error ? (
-          <span className="text-[10.5px] text-red-400/90">{error}</span>
-        ) : null}
-      </div>
+      {compact ? null : (
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            variant="brand"
+            size="sm"
+            disabled={decided || submitting}
+            onClick={() => void decide(true)}
+          >
+            接受
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            disabled={decided || submitting}
+            onClick={() => void decide(false)}
+          >
+            拒绝
+          </Button>
+          {submitting ? (
+            <span className="text-[10.5px] text-muted-dim">提交中…</span>
+          ) : null}
+          {error ? (
+            <span className="text-[10.5px] text-red-400/90">{error}</span>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

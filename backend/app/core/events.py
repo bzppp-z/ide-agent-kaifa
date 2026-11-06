@@ -88,6 +88,9 @@ class ChangeSetProposedEvent(BaseSSEEvent):
     type: Literal["change_set.proposed"] = "change_set.proposed"
     change_set_id: str
     files: list[dict[str, Any]] = Field(default_factory=list)
+    # auto 模式下无需审批、已直接落盘；前端据此渲染为只读摘要卡片。
+    auto: bool = False
+    auto_applied: bool = False
 
 
 class CommandProposedEvent(BaseSSEEvent):
