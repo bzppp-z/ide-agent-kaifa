@@ -81,12 +81,14 @@
 **Goal:** 扩展 SSE/REST 契约，落地三档权限门控与会话偏好持久化，实现"停止生成"，为后续阶段提供统一入口。
 **Tasks:** 3
 **Status:** Done
+**Completion:** √
 
 ### Phase 2: 任务规划与代码检索
 **File:** [phase-2-planning-and-search.md](phase-2-planning-and-search.md)
 **Goal:** agent 能先给计划再执行，并靠文件/符号/文本三种检索定位代码；前端渲染计划卡片。
 **Tasks:** 3
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ### Phase 3: 多文件编辑与检查点
 **File:** [phase-3-multifile-edits-and-checkpoints.md](phase-3-multifile-edits-and-checkpoints.md)

@@ -16,6 +16,7 @@ export const theme = {
     textDim: "#8B949E",
     terminalBg: "#0B0D0E",
     danger: "#F87171",
+    success: "#0FDC78",
   },
   radius: {
     sm: "6px",

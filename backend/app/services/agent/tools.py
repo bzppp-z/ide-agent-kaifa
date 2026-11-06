@@ -1,4 +1,4 @@
-"""Agent 可调用的 4 个工具：list / read / search / write_patch。
+"""Agent 可调用的工具：list / read / search / write_patch / search_text 等。
 
 **本地模式适配：** 所有文件访问都走 ``SandboxService`` 的抽象方法
 （``list_files`` / ``read_file`` / ``write_file``），搜索用 Python 递归遍历实现，
@@ -17,26 +17,20 @@ from pydantic import BaseModel
 
 from app.core.security import validate_workspace_path
 from app.services.permissions import can_write, normalize_permission_mode
+from app.services.repo_index import (
+    MAX_SYMBOL_FILE_BYTES,
+    SKIP_DIR_NAMES,
+    RepoIndex,
+    SearchPage,
+)
 from app.services.sandbox import SandboxService
 
 MAX_READ_LINES = 2000
 MAX_SEARCH_MATCHES = 100
 MAX_SEARCH_FILES = 200
 MAX_SEARCH_DEPTH = 4
-MAX_SEARCH_FILE_BYTES = 1024 * 1024
-SKIP_DIR_NAMES = {
-    ".git",
-    ".hg",
-    ".svn",
-    "node_modules",
-    "dist",
-    "build",
-    ".next",
-    ".venv",
-    "venv",
-    "__pycache__",
-    "target",
-}
+MAX_SEARCH_FILE_BYTES = MAX_SYMBOL_FILE_BYTES
+MAX_AGENT_SEARCH_RESULTS = 50
 
 TRUNCATED_MARKER = "[truncated]"
 
@@ -81,12 +75,70 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     ),
     _function_schema(
         "search",
-        "在指定目录下递归搜索文本（深度 ≤ 4 层），返回 path:line: content。query 可以是正则。",
+        "旧版文本检索别名（深度 ≤ 4 层）；新任务优先使用 search_text。",
         {
             "query": {"type": "string", "description": "要搜索的文本或正则表达式"},
             "path": {"type": "string", "description": "workspace 相对目录路径；空字符串表示根目录"},
         },
         ["query", "path"],
+    ),
+    _function_schema(
+        "search_files",
+        "按路径片段检索文件（不读取文件内容），返回匹配的相对路径，可用 offset 翻页。",
+        {
+            "fragment": {"type": "string", "description": "路径中要匹配的片段（不区分大小写）"},
+            "limit": {"type": "integer", "description": "本页最多返回条数，默认 50，上限 50"},
+            "offset": {"type": "integer", "description": "分页偏移，默认 0"},
+        },
+        ["fragment"],
+    ),
+    _function_schema(
+        "find_symbols",
+        "按名称检索顶层符号（函数/类/接口/类型等），返回 path:line: signature。",
+        {
+            "name": {"type": "string", "description": "符号名称片段（不区分大小写）"},
+            "limit": {"type": "integer", "description": "本页最多返回条数，默认 50，上限 50"},
+            "offset": {"type": "integer", "description": "分页偏移，默认 0"},
+        },
+        ["name"],
+    ),
+    _function_schema(
+        "search_text",
+        "按需读取文件内容做文本/正则检索，返回 path:line: content；跳过目录与 1MB 以上文件。",
+        {
+            "query": {"type": "string", "description": "要搜索的文本或正则表达式"},
+            "path": {"type": "string", "description": "workspace 相对目录或文件路径；空字符串表示根目录"},
+            "limit": {"type": "integer", "description": "本页最多返回条数，默认 50，上限 50"},
+            "offset": {"type": "integer", "description": "分页偏移，默认 0"},
+        },
+        ["query", "path"],
+    ),
+    _function_schema(
+        "update_plan",
+        (
+            "更新本次任务计划（整份快照）。items 需 3–8 项；status 只能是 "
+            "pending/in_progress/done/failed/skipped；同一时刻最多 1 项 in_progress。"
+        ),
+        {
+            "items": {
+                "type": "array",
+                "description": "完整计划项数组（不是增量）",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "已有计划项 id；首次可省略"},
+                        "title": {"type": "string", "description": "计划项标题"},
+                        "status": {
+                            "type": "string",
+                            "enum": ["pending", "in_progress", "done", "failed", "skipped"],
+                        },
+                        "note": {"type": "string", "description": "失败/跳过时的原因说明"},
+                    },
+                    "required": ["title", "status"],
+                },
+            }
+        },
+        ["items"],
     ),
     _function_schema(
         "write_patch",
@@ -114,6 +166,7 @@ class ToolRegistry:
         workspace_path: str,
         dry_run: bool = False,
         permission_mode: str = "approval",
+        repo_index: RepoIndex | None = None,
     ) -> ToolResult:
         if not isinstance(args, dict):
             args = {}
@@ -125,9 +178,25 @@ class ToolRegistry:
             result = self._read(args, sandbox, workspace_path)
         elif name == "search":
             result = self._search(args, sandbox, workspace_path)
+        elif name == "search_files":
+            result = self._search_files(args, sandbox, workspace_path, repo_index)
+        elif name == "find_symbols":
+            result = self._find_symbols(args, sandbox, workspace_path, repo_index)
+        elif name == "search_text":
+            result = self._search_text(args, sandbox, workspace_path, repo_index)
+        elif name == "update_plan":
+            result = ToolResult(
+                ok=False,
+                summary="update_plan 由 AgentLoop 处理，tool registry 不直接执行",
+            )
         elif name == "write_patch":
             result = self._write_patch(
-                args, sandbox, workspace_path, dry_run=dry_run, permission_mode=permission_mode
+                args,
+                sandbox,
+                workspace_path,
+                dry_run=dry_run,
+                permission_mode=permission_mode,
+                repo_index=repo_index,
             )
         else:
             result = ToolResult(ok=False, summary=f"unknown tool: {name}")
@@ -263,6 +332,63 @@ class ToolRegistry:
             },
         )
 
+    def _search_files(
+        self,
+        args: dict[str, Any],
+        sandbox: SandboxService,
+        workspace_path: str,
+        repo_index: RepoIndex | None,
+    ) -> ToolResult:
+        fragment = _require_str_arg(args, "fragment")
+        index = self._resolve_index(repo_index, sandbox, workspace_path)
+        page = index.search_files(fragment, limit=_int_arg(args, "limit", MAX_AGENT_SEARCH_RESULTS), offset=_int_arg(args, "offset"))
+        return _page_result(page, f"file(s) matching {fragment!r}")
+
+    def _find_symbols(
+        self,
+        args: dict[str, Any],
+        sandbox: SandboxService,
+        workspace_path: str,
+        repo_index: RepoIndex | None,
+    ) -> ToolResult:
+        name = _require_str_arg(args, "name")
+        index = self._resolve_index(repo_index, sandbox, workspace_path)
+        page = index.find_symbols(name, limit=_int_arg(args, "limit", MAX_AGENT_SEARCH_RESULTS), offset=_int_arg(args, "offset"))
+        return _page_result(page, f"symbol(s) matching {name!r}")
+
+    def _search_text(
+        self,
+        args: dict[str, Any],
+        sandbox: SandboxService,
+        workspace_path: str,
+        repo_index: RepoIndex | None,
+    ) -> ToolResult:
+        query = _require_str_arg(args, "query")
+        raw_path = _require_str_arg(args, "path")
+        if not query:
+            raise ValueError("search query must not be empty")
+        relative = _normalize_optional_root(raw_path)
+
+        if not _path_exists(sandbox, workspace_path, relative):
+            return ToolResult(ok=False, summary=f"path not found: {raw_path}")
+
+        index = self._resolve_index(repo_index, sandbox, workspace_path)
+        page = index.search_text(
+            query,
+            path=relative,
+            limit=_int_arg(args, "limit", MAX_AGENT_SEARCH_RESULTS),
+            offset=_int_arg(args, "offset"),
+        )
+        return _page_result(page, f"match(es) for {query!r}")
+
+    def _resolve_index(
+        self, repo_index: RepoIndex | None, sandbox: SandboxService, workspace_path: str
+    ) -> RepoIndex:
+        """调用方未传索引时建一个临时实例（未构建 → 实时扫描）。"""
+        if repo_index is not None:
+            return repo_index
+        return RepoIndex(sandbox, workspace_path, max_results=MAX_AGENT_SEARCH_RESULTS)
+
     def _write_patch(
         self,
         args: dict[str, Any],
@@ -270,6 +396,7 @@ class ToolRegistry:
         workspace_path: str,
         dry_run: bool = False,
         permission_mode: str = "approval",
+        repo_index: RepoIndex | None = None,
     ) -> ToolResult:
         if not can_write(permission_mode):
             return ToolResult(
@@ -314,6 +441,8 @@ class ToolRegistry:
             )
 
         sandbox.write_file(workspace_path, relative, after)
+        if repo_index is not None:
+            repo_index.invalidate(relative)
 
         return ToolResult(
             ok=True,
@@ -336,6 +465,57 @@ def _normalize_optional_root(path: str) -> str:
     if stripped in ("", "."):
         return ""
     return validate_workspace_path(path)
+
+
+def _int_arg(args: dict[str, Any], key: str, default: int = 0) -> int:
+    value = args.get(key, default)
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _page_result(page: SearchPage, label: str) -> ToolResult:
+    """把索引分页结果转换成统一的 ToolResult（extra 字段固定）。"""
+    summary = f"found {page.matches} {label}"
+    if page.next_offset is not None:
+        summary += f" (more available; next offset: {page.next_offset})"
+    if page.index_building:
+        summary += " (index building; scanned live)"
+
+    return ToolResult(
+        ok=True,
+        summary=summary,
+        details="\n".join(page.lines) or None,
+        extra={
+            "matches": page.matches,
+            "files_scanned": page.files_scanned,
+            "truncated": page.truncated,
+            "next_offset": page.next_offset,
+            "index_building": page.index_building,
+        },
+    )
+
+
+def _path_exists(sandbox: SandboxService, workspace_path: str, relative: str) -> bool:
+    try:
+        sandbox.list_files(workspace_path, relative)
+        return True
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+    if not relative:
+        return False
+    try:
+        sandbox.read_file(workspace_path, relative)
+        return True
+    except UnicodeDecodeError:
+        return True  # 存在但不可按 UTF-8 读取，交给检索层处理
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
 
 
 def _build_matcher(query: str):

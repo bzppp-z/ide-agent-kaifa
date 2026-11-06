@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from app.db import utcnow
 from app.models.session import Session as SessionModel
 from app.services.demo_repos import DEFAULT_DEMO_REPO, get_demo_repo
+from app.services.repo_index import RepoIndex
 from app.services.sandbox import SandboxService
 
 logger = logging.getLogger(__name__)
@@ -29,11 +30,17 @@ class WorkspaceService:
         session_factory: async_sessionmaker | None = None,
         idle_timeout_min: int = 30,
         idle_interval_seconds: float = 60.0,
+        repo_indexes: dict[str, RepoIndex] | None = None,
+        repo_index_max_files: int = 10000,
+        repo_index_max_results: int = 50,
     ) -> None:
         self.sandbox = sandbox
         self.session_factory = session_factory
         self.idle_timeout_min = idle_timeout_min
         self.idle_interval_seconds = idle_interval_seconds
+        self.repo_indexes = repo_indexes if repo_indexes is not None else {}
+        self.repo_index_max_files = repo_index_max_files
+        self.repo_index_max_results = repo_index_max_results
 
     async def ensure_container(self, session_id: str, demo_repo: str | None = None) -> str:
         """幂等创建会话 workspace 并写入 demo repo，返回 workspace 绝对路径。"""
@@ -61,6 +68,7 @@ class WorkspaceService:
                         row.container_id = str(local_dir)
                         row.last_active_at = utcnow()
                         await db.commit()
+            self._ensure_repo_index(session_id, str(local_dir))
             return str(local_dir)
 
         existing_container_id = session_row.container_id if session_row else None
@@ -87,7 +95,21 @@ class WorkspaceService:
                     row.last_active_at = utcnow()
                     await db.commit()
 
+        self._ensure_repo_index(session_id, container_id)
         return container_id
+
+    def _ensure_repo_index(self, session_id: str, workspace_path: str) -> None:
+        """按需注册并后台构建项目索引；索引已就绪时直接复用。"""
+        index = self.repo_indexes.get(session_id)
+        if index is None or index.workspace_path != workspace_path:
+            index = RepoIndex(
+                self.sandbox,
+                workspace_path,
+                max_files=self.repo_index_max_files,
+                max_results=self.repo_index_max_results,
+            )
+            self.repo_indexes[session_id] = index
+        index.schedule_build()
 
     def _is_initialized(self, container_id: str) -> bool:
         try:
@@ -126,6 +148,11 @@ class WorkspaceService:
 
             if reclaimed:
                 await db.commit()
+
+        for session_id in reclaimed:
+            index = self.repo_indexes.pop(session_id, None)
+            if index is not None:
+                index.cancel_build()
 
         return reclaimed
 

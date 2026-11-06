@@ -5,6 +5,7 @@ import type { ChatItem } from "../stores/useChatStore";
 import { useChatStore } from "../stores/useChatStore";
 import { useSessionStore } from "../stores/useSessionStore";
 import { PatchDiff } from "./PatchDiff";
+import { PlanCard } from "./PlanCard";
 import { SseMessage } from "./SseMessage";
 import { ToolCard } from "./ToolCard";
 import { Button } from "./ui/button";
@@ -88,6 +89,7 @@ function ChatEventView({
 
 export function ChatPanel() {
   const items = useChatStore((state) => state.items);
+  const plan = useChatStore((state) => state.plan);
   const streaming = useChatStore((state) => state.streaming);
   const sendMessage = useChatStore((state) => state.sendMessage);
   const stopStreaming = useChatStore((state) => state.stopStreaming);
@@ -144,6 +146,12 @@ export function ChatPanel() {
           <span className="ml-auto text-[10.5px] text-muted-dim">agent</span>
         )}
       </header>
+
+      {plan && plan.items.length > 0 ? (
+        <div className="shrink-0 px-3 pt-3">
+          <PlanCard />
+        </div>
+      ) : null}
 
       <div ref={listRef} className="flex-1 overflow-y-auto px-3 py-3">
         {items.length === 0 ? (

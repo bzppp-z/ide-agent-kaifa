@@ -25,6 +25,7 @@ from app.db import SessionLocal, engine, init_db
 from app.services.agent.mock_provider import MockProvider
 from app.services.agent.pending import PendingPatchRegistry
 from app.services.agent.provider import DeepSeekProvider
+from app.services.repo_index import RepoIndex
 from app.services.sandbox import SandboxService
 from app.services.workspace import WorkspaceService
 
@@ -50,10 +51,14 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     sandbox = SandboxService(settings.workspace_root_path)
+    repo_indexes: dict[str, RepoIndex] = {}
     workspace = WorkspaceService(
         sandbox,
         session_factory=SessionLocal,
         idle_timeout_min=settings.container_idle_timeout_min,
+        repo_indexes=repo_indexes,
+        repo_index_max_files=settings.repo_index_max_files,
+        repo_index_max_results=settings.repo_index_max_results,
     )
 
     app.state.settings = settings
@@ -61,6 +66,7 @@ async def lifespan(app: FastAPI):
     app.state.session_factory = SessionLocal
     app.state.sandbox = sandbox
     app.state.workspace = workspace
+    app.state.repo_indexes = repo_indexes
     app.state.provider = build_provider(settings)
     app.state.loop_states = {}
     app.state.pending_patches = PendingPatchRegistry()

@@ -133,6 +133,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     try {
       const detail = await getSession(id);
       useChatStore.getState().loadHistory(detail.messages);
+      useChatStore.getState().setPlan(detail.plan ?? null);
       set({
         demoRepo: detail.demo_repo,
         localPath: detail.local_path ?? null,

@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { formatError, runAgent, stopRun } from "../lib/api";
-import type { Message, SSEEvent } from "../lib/types";
+import type { Message, PlanState, SSEEvent } from "../lib/types";
 
 // ------------------------------------------------------------------ chat items
 
@@ -86,6 +86,8 @@ function nextId(prefix: string): string {
 
 interface ChatState {
   items: ChatItem[];
+  /** 当前 run 的任务计划；刷新后由 session detail 恢复。 */
+  plan: PlanState | null;
   streaming: boolean;
   runId: string | null;
   error: string | null;
@@ -95,6 +97,7 @@ interface ChatState {
   pushEvent: (event: SSEEvent) => void;
   /** 刷新恢复：用 GET session 返回的历史消息重建气泡（不覆盖正在流式的 run）。 */
   loadHistory: (messages: Message[]) => void;
+  setPlan: (plan: PlanState | null) => void;
   setSseAbort: (controller: AbortController | null) => void;
   /** 标记某个 patch 卡片的处理结果（PatchDiff 在决议成功后调用）。 */
   setPatchStatus: (patchId: string, status: "accepted" | "rejected") => void;
@@ -106,6 +109,7 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>((set, get) => ({
   items: [],
+  plan: null,
   streaming: false,
   runId: null,
   error: null,
@@ -250,6 +254,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return { items };
         }
 
+        case "plan.update": {
+          const plan = event.plan;
+          if (!plan || !Array.isArray(plan.items) || plan.items.length === 0) {
+            return { items };
+          }
+          return { items, plan };
+        }
+
         case "run.output": {
           const last = items[items.length - 1];
           if (last && last.kind === "output" && last.stream === event.stream) {
@@ -305,6 +317,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setSseAbort: (controller) => set({ sseAbort: controller }),
+
+  setPlan: (plan) =>
+    set({ plan: plan && Array.isArray(plan.items) && plan.items.length > 0 ? plan : null }),
 
   loadHistory: (messages) => {
     if (get().streaming) return;
@@ -387,6 +402,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clear: () =>
     set({
       items: [],
+      plan: null,
       streaming: false,
       runId: null,
       error: null,

@@ -194,4 +194,8 @@ async def delete_session(
         row.container_id = None
         await db.commit()
 
+    index = request.app.state.repo_indexes.pop(session_id, None)
+    if index is not None:
+        index.cancel_build()
+
     return {"ok": True, "session_id": session_id}

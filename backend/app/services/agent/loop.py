@@ -22,15 +22,18 @@ from app.core.events import (
     DoneEvent,
     MessageDeltaEvent,
     PatchProposedEvent,
+    PlanUpdateEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from app.services.agent.context import truncate_messages
 from app.services.agent.mock_provider import MockProvider
 from app.services.agent.pending import PendingPatchRegistry
+from app.services.agent.plan import PlanState, apply_update, plan_from_json
 from app.services.agent.provider import LLMProvider, ToolCallChunk
 from app.services.agent.tools import ToolRegistry, ToolResult
 from app.services.permissions import normalize_permission_mode
+from app.services.repo_index import RepoIndex
 from app.services.sandbox import SandboxService
 
 MAX_STEPS_DEFAULT = 25
@@ -98,9 +101,20 @@ class AgentLoop:
 你可以使用以下工具：
 {tool_descriptions}
 
+项目地图（只有文件路径、目录与符号，不含文件内容）：
+{project_map}
+
+规划规则：
+- 当任务涉及 2 个及以上文件、新建文件、重构、修复缺陷、实现功能或数据迁移时，必须先调用 update_plan 给出 3–8 项计划，再开始执行
+- 计划项完成一项就立即调用 update_plan 把它标记为 done
+- 某项失败时标记为 failed，并在 note 写明原因
+- 同一时刻最多只能有 1 项处于 in_progress
+- 每次 update_plan 都提交完整计划快照，并保留已有计划项的 id
+
 规则：
 - 所有路径必须是 workspace 下的相对路径，不要使用绝对路径或 ..
 - 严格遵守当前权限模式：只读模式下不要尝试写入或执行命令，也不要反复重试被拒绝的调用
+- 检索代码优先使用 search_text / find_symbols / search_files；search 是旧版文本检索别名
 - 一次工具调用只处理一个文件的修改
 - 如果需要修改多个文件，依次调用工具
 - 使用中文回复用户
@@ -133,6 +147,8 @@ class AgentLoop:
         run_id: str | None = None,
         patch_approval_timeout: float = PATCH_APPROVAL_TIMEOUT_SECONDS,
         permission_mode: str = "approval",
+        repo_index: RepoIndex | None = None,
+        initial_plan: PlanState | dict[str, Any] | None = None,
     ) -> AsyncIterator[BaseSSEEvent]:
         provider = provider or self.provider
         tools = tools or self.tools
@@ -149,8 +165,13 @@ class AgentLoop:
 
         run_id = run_id or f"{session_id}:{uuid4().hex[:12]}"
         tracker = RecentToolCallTracker(window=3)
+        plan_state = plan_from_json(initial_plan)
         messages = self._build_messages(
-            user_message, tools, describe_model(provider), permission_mode
+            user_message,
+            tools,
+            describe_model(provider),
+            permission_mode,
+            repo_index=repo_index,
         )
         steps = 0
         tokens_used = 0
@@ -206,8 +227,14 @@ class AgentLoop:
                 tool_name = tool_call.name or ""
                 yield ToolCallEvent(call_id=call_id, tool_name=tool_name, arguments=arguments)
                 started_at = time.perf_counter()
+                plan_event: PlanUpdateEvent | None = None
 
-                if tool_name == "write_patch" and self.pending_patches is not None:
+                if tool_name == "update_plan":
+                    result, plan_state, plan_event = self._handle_plan_update(
+                        arguments, plan_state
+                    )
+                    result.duration_ms = int((time.perf_counter() - started_at) * 1000)
+                elif tool_name == "write_patch" and self.pending_patches is not None:
                     preview = await tools.call(
                         "write_patch",
                         arguments,
@@ -215,6 +242,7 @@ class AgentLoop:
                         session_workspace_path,
                         dry_run=True,
                         permission_mode=permission_mode,
+                        repo_index=repo_index,
                     )
                     if preview.ok and preview.extra:
                         patch_id, proposed = self._prepare_patch(
@@ -237,6 +265,7 @@ class AgentLoop:
                                 sandbox,
                                 session_workspace_path,
                                 permission_mode=permission_mode,
+                                repo_index=repo_index,
                             )
                         else:
                             preview.duration_ms = int(
@@ -261,9 +290,13 @@ class AgentLoop:
                         sandbox,
                         session_workspace_path,
                         permission_mode=permission_mode,
+                        repo_index=repo_index,
                     )
 
                 tracker.record(tool_name, arguments)
+
+                if plan_event is not None:
+                    yield plan_event
 
                 yield ToolResultEvent(
                     call_id=call_id,
@@ -306,6 +339,31 @@ class AgentLoop:
         )
 
     # --------------------------------------------------------------- internal
+
+    def _handle_plan_update(
+        self, arguments: dict[str, Any], current: PlanState | None
+    ) -> tuple[ToolResult, PlanState | None, PlanUpdateEvent | None]:
+        """校验整份计划快照；成功时返回新状态与 plan.update 事件。"""
+        try:
+            state = apply_update(current, arguments.get("items"))
+        except ValueError as exc:
+            return (
+                ToolResult(
+                    ok=False,
+                    summary=f"计划未更新：{exc}",
+                    details="请修正后重新调用 update_plan（items 必须是 3–8 项的完整快照）。",
+                ),
+                current,
+                None,
+            )
+
+        result = ToolResult(
+            ok=True,
+            summary=f"计划已更新：{state.done_count}/{len(state.items)} 完成",
+            details=state.render(),
+            extra={"plan": state.model_dump(mode="json")},
+        )
+        return result, state, PlanUpdateEvent(plan=state.model_dump(mode="json"))
 
     def _prepare_patch(
         self,
@@ -350,6 +408,7 @@ class AgentLoop:
         tools: ToolRegistry,
         model_name: str = "",
         permission_mode: str = "approval",
+        repo_index: RepoIndex | None = None,
     ) -> list[dict]:
         descriptions = []
         for schema in tools.to_schema():
@@ -360,6 +419,12 @@ class AgentLoop:
                 f"- {function.get('name')}({parameter_names}): {function.get('description', '')}"
             )
 
+        project_map = (
+            repo_index.summary()
+            if repo_index is not None
+            else "项目索引不可用；可先用 list 或 search_files 了解目录结构。"
+        )
+
         messages: list[dict] = [
             {
                 "role": "system",
@@ -367,6 +432,7 @@ class AgentLoop:
                     tool_descriptions="\n".join(descriptions),
                     model_name=model_name.strip() or "未知",
                     permission_desc=describe_permission(permission_mode),
+                    project_map=project_map,
                 ),
             }
         ]

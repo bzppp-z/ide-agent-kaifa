@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     max_steps_per_run: int = 25
     max_tokens_per_run: int = 200000
 
+    # 项目索引：最多索引文件数与单次检索返回的最大条数
+    repo_index_max_files: int = 10000
+    repo_index_max_results: int = 50
+
     # 认证 / 服务
     jwt_secret: str = "change-me-in-production"
     jwt_expire_hours: int = 24

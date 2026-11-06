@@ -84,4 +84,9 @@ async def write_file(
     container_id = await request.app.state.workspace.ensure_container(session_id)
     _sandbox(request).write_file(container_id, relative, body.content)
 
+    # 写入成功后增量失效该路径，保证下一次检索读到新内容
+    index = getattr(request.app.state, "repo_indexes", {}).get(session_id)
+    if index is not None:
+        index.invalidate(relative)
+
     return {"ok": True, "path": relative}

@@ -23,17 +23,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_session, get_stream_session
-from app.api.sessions import ensure_session_ownership, load_session_or_404
+from app.api.sessions import (
+    _parse_plan,
+    ensure_session_ownership,
+    load_session_or_404,
+)
 from app.core.events import (
     DoneEvent,
     ErrorEvent,
     MessageDeltaEvent,
     PatchProposedEvent,
+    PlanUpdateEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from app.db import get_db_session, utcnow
 from app.models.message import Message as MessageModel
+from app.models.session import Session as SessionModel
 from app.models.tool_call import ToolCall as ToolCallModel
 from app.schemas.agent import AgentRunRequest, AgentRunResponse, PatchDecisionRequest
 from app.services.agent.loop import AgentLoop
@@ -96,6 +102,7 @@ async def run_agent(
             history=history,
             provider=provider,
             permission_mode=session_row.permission_mode or "approval",
+            initial_plan=_parse_plan(session_row),
         ),
         name=f"devflow-agent-{session_id}",
     )
@@ -210,6 +217,7 @@ async def _drive_agent_loop(
     history: list[dict],
     provider: LLMProvider | None = None,
     permission_mode: str = "approval",
+    initial_plan: dict | None = None,
 ) -> None:
     """后台跑 AgentLoop，把每个事件放进 queue；结束时放哨兵 None。"""
     try:
@@ -229,6 +237,8 @@ async def _drive_agent_loop(
             max_tokens=settings.max_tokens_per_run,
             run_id=run_id,
             permission_mode=permission_mode,
+            repo_index=app.state.repo_indexes.get(session_id),
+            initial_plan=initial_plan,
         ):
             queue.put_nowait(event)
     except asyncio.CancelledError:
@@ -342,6 +352,14 @@ async def _persist_event(
 
         if isinstance(event, MessageDeltaEvent):
             assistant_parts.append(event.content)
+            return
+
+        if isinstance(event, PlanUpdateEvent):
+            row = await db.get(SessionModel, session_id)
+            if row is not None:
+                row.plan_json = json.dumps(event.plan, ensure_ascii=False)
+                row.last_active_at = utcnow()
+                await db.commit()
             return
 
         if isinstance(event, PatchProposedEvent):
