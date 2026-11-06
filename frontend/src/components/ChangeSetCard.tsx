@@ -101,6 +101,17 @@ export function ChangeSetCard({ item }: { item: ChatChangeSetItem }) {
         <span className="font-mono text-[11.5px] text-text">
           {item.files.length} 个文件
         </span>
+        {item.verification ? (
+          <span
+            className={
+              item.verification === "passed"
+                ? "rounded border border-brand/40 bg-brand/10 px-1 py-0.5 text-[10px] text-brand"
+                : "rounded border border-red-500/40 bg-red-500/10 px-1 py-0.5 text-[10px] text-red-400/90"
+            }
+          >
+            {item.verification === "passed" ? "已验证" : "验证失败"}
+          </span>
+        ) : null}
         <span className="ml-auto text-muted-dim">
           {readonly
             ? item.autoApplied

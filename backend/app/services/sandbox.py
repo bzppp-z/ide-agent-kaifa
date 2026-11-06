@@ -28,6 +28,7 @@ import contextlib
 import hashlib
 import shutil
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,8 @@ class SandboxService:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         # 用户显式选择的真实目录（local_path 会话），允许在 root 之外操作
         self._external_workspaces: set[Path] = set()
+        # 每个 workspace 一把命令锁：agent 命令与终端输入互斥。
+        self.command_locks: dict[str, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------ sessions
 
@@ -93,6 +96,79 @@ class SandboxService:
 
         output = (stdout or b"").decode("utf-8", errors="replace")
         return (process.returncode if process.returncode is not None else -1), output
+
+    async def exec_stream(
+        self,
+        container_id: str,
+        command: str,
+        timeout: float,
+        on_output: Callable[[str, str], Awaitable[None]] | None = None,
+    ) -> tuple[int, str]:
+        """流式执行命令：逐行回传输出，同时累积完整结果。
+
+        ``on_output(stream, chunk)`` 每读到一行就调用一次；``exec`` 的既有行为不变。
+        执行期间持有该 workspace 的命令锁，终端输入会等命令结束后再写入。
+        超时返回 ``(124, 已有输出 + 超时说明)``；被取消时 kill 子进程并继续抛出。
+        """
+        workspace = self._resolve_container(container_id)
+        if not isinstance(command, str) or not command.strip():
+            raise ValueError("command must not be empty")
+
+        try:
+            effective_timeout = float(timeout)
+        except (TypeError, ValueError):
+            raise ValueError("timeout must be a number") from None
+        if effective_timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+        async with self.command_lock(container_id):
+            process = await asyncio.create_subprocess_exec(
+                *_shell_argv(command),
+                cwd=str(workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            assert process.stdout is not None  # PIPE 一定存在，防御性断言
+            output_parts: list[str] = []
+
+            async def read_lines() -> None:
+                while True:
+                    line = await process.stdout.readline()
+                    if not line:
+                        return
+                    chunk = line.decode("utf-8", errors="replace")
+                    output_parts.append(chunk)
+                    if on_output is not None:
+                        await on_output("stdout", chunk)
+
+            try:
+                await asyncio.wait_for(read_lines(), timeout=effective_timeout)
+                await process.wait()
+                exit_code = process.returncode if process.returncode is not None else -1
+            except asyncio.TimeoutError:
+                exit_code = 124
+                output_parts.append(
+                    f"[timeout] command timed out after {effective_timeout:g}s: {command}"
+                )
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if process.returncode is None:
+                    with contextlib.suppress(ProcessLookupError):
+                        process.kill()
+                    with contextlib.suppress(Exception):
+                        await process.wait()
+
+            return exit_code, "".join(output_parts)
+
+    def command_lock(self, container_id: str) -> asyncio.Lock:
+        """返回该 workspace 共享的命令锁（按绝对路径归一化后复用同一把）。"""
+        key = str(self._resolve_container(container_id, must_exist=False))
+        lock = self.command_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.command_locks[key] = lock
+        return lock
 
     async def stop_and_remove(self, container_id: str) -> None:
         """清理会话 workspace（幂等）。用户真实目录永远不会被删除。"""

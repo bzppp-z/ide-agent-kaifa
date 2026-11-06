@@ -5,6 +5,7 @@ import type { ChatItem } from "../stores/useChatStore";
 import { useChatStore } from "../stores/useChatStore";
 import { useSessionStore } from "../stores/useSessionStore";
 import { ChangeSetCard } from "./ChangeSetCard";
+import { CommandCard } from "./CommandCard";
 import { PatchDiff } from "./PatchDiff";
 import { PlanCard } from "./PlanCard";
 import { SseMessage } from "./SseMessage";
@@ -49,6 +50,9 @@ function ChatEventView({
 
     case "change_set":
       return <ChangeSetCard item={item} />;
+
+    case "command":
+      return <CommandCard item={item} />;
 
     case "output":
       return (

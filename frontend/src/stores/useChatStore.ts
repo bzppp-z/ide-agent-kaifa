@@ -62,6 +62,31 @@ export interface ChatChangeSetItem {
   status: "pending" | "submitting" | "done";
   results: Record<string, ChangeSetFileStatus>;
   error?: string | null;
+  /** 最近一次 run_command 的验证结论（徽标展示）。 */
+  verification?: "passed" | "failed" | null;
+}
+
+export type ChatCommandStatus =
+  | "pending"
+  | "running"
+  | "success"
+  | "failed"
+  | "rejected";
+
+export interface ChatCommandItem {
+  id: string;
+  kind: "command";
+  commandId: string;
+  callId: string;
+  command: string;
+  cwd: string;
+  reason: string;
+  timeoutSeconds: number;
+  status: ChatCommandStatus;
+  output: string;
+  ok: boolean | null;
+  exitCode: number | null;
+  durationMs: number | null;
 }
 
 export interface ChatOutputItem {
@@ -93,6 +118,7 @@ export type ChatItem =
   | ChatToolItem
   | ChatPatchItem
   | ChatChangeSetItem
+  | ChatCommandItem
   | ChatOutputItem
   | ChatErrorItem
   | ChatDoneItem;
@@ -129,6 +155,8 @@ interface ChatState {
     results: Record<string, ChangeSetFileStatus>,
     error?: string | null,
   ) => void;
+  /** 命令卡片在响应审批后立即切换状态（不等 tool.result）。 */
+  setCommandStatus: (commandId: string, status: ChatCommandStatus) => void;
   /** 主动停止：先通知后端取消 run，再断开 SSE 并把在写消息收尾。 */
   stopStreaming: (sessionId: string) => Promise<void>;
   endStream: () => void;
@@ -224,6 +252,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
 
         case "tool.call": {
+          // run_command 由 CommandCard 承载，避免与工具卡片重复展示。
+          if (event.tool_name === "run_command") {
+            return { items };
+          }
           items.push({
             id: nextId("tool"),
             kind: "tool",
@@ -236,6 +268,55 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
 
         case "tool.result": {
+          const resultRecord =
+            event.result && typeof event.result === "object"
+              ? (event.result as { extra?: Record<string, unknown> })
+              : null;
+          const extra: Record<string, unknown> = resultRecord?.extra ?? {};
+          const exitCode =
+            typeof extra.exit_code === "number" ? extra.exit_code : null;
+
+          if (event.tool_name === "run_command") {
+            // 验证结论同步到最近一个变更批次卡片。
+            for (let i = items.length - 1; i >= 0; i -= 1) {
+              const item = items[i];
+              if (item.kind === "change_set") {
+                items[i] = {
+                  ...item,
+                  verification: event.ok ? "passed" : "failed",
+                };
+                break;
+              }
+            }
+          }
+
+          let commandIndex = -1;
+          if (event.tool_name === "run_command") {
+            for (let i = items.length - 1; i >= 0; i -= 1) {
+              const item = items[i];
+              if (item.kind === "command" && item.callId === event.call_id) {
+                commandIndex = i;
+                break;
+              }
+            }
+          }
+          if (commandIndex !== -1) {
+            const existing = items[commandIndex] as ChatCommandItem;
+            items[commandIndex] = {
+              ...existing,
+              status:
+                extra.rejected === true
+                  ? "rejected"
+                  : event.ok
+                    ? "success"
+                    : "failed",
+              ok: event.ok,
+              exitCode,
+              durationMs: event.duration_ms,
+            };
+            return { items };
+          }
+
           let index = -1;
           for (let i = items.length - 1; i >= 0; i -= 1) {
             const item = items[i];
@@ -329,7 +410,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return { items, plan };
         }
 
+        case "command.proposed": {
+          items.push({
+            id: nextId("command"),
+            kind: "command",
+            commandId: event.command_id,
+            callId: event.call_id ?? "",
+            command: event.command,
+            cwd: event.cwd ?? "",
+            reason: event.reason ?? "",
+            timeoutSeconds: event.timeout_seconds ?? 0,
+            status: "pending",
+            output: "",
+            ok: null,
+            exitCode: null,
+            durationMs: null,
+          });
+          return { items };
+        }
+
         case "run.output": {
+          if (event.call_id) {
+            for (let i = items.length - 1; i >= 0; i -= 1) {
+              const item = items[i];
+              if (item.kind === "command" && item.callId === event.call_id) {
+                items[i] = {
+                  ...item,
+                  output: item.output + event.chunk,
+                  status: item.status === "pending" ? "running" : item.status,
+                };
+                return { items };
+              }
+            }
+          }
           const last = items[items.length - 1];
           if (last && last.kind === "output" && last.stream === event.stream) {
             items[items.length - 1] = {
@@ -435,6 +548,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       items: state.items.map((item) =>
         item.kind === "change_set" && item.id === itemId
           ? { ...item, status: "done", results, error }
+          : item,
+      ),
+    })),
+
+  setCommandStatus: (commandId, status) =>
+    set((state) => ({
+      items: state.items.map((item) =>
+        item.kind === "command" && item.commandId === commandId
+          ? { ...item, status }
           : item,
       ),
     })),

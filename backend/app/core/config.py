@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     max_steps_per_run: int = 25
     max_tokens_per_run: int = 200000
 
+    # 命令执行：默认/最大超时、单次 run 命令数上限、验证失败自动修复轮数
+    command_timeout_default: int = 30
+    command_timeout_max: int = 120
+    max_commands_per_run: int = 10
+    max_auto_fix_rounds: int = 2
+
     # 项目索引：最多索引文件数与单次检索返回的最大条数
     repo_index_max_files: int = 10000
     repo_index_max_results: int = 50

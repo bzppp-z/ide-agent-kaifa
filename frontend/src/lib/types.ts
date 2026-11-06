@@ -68,6 +68,12 @@ export interface ChangeSetDecisionResult {
   failed: string[];
 }
 
+export interface CommandDecisionResult {
+  ok: true;
+  command_id: string;
+  accepted: boolean;
+}
+
 /** 用户自定义模型 Provider（api_key 只返回掩码）。 */
 export interface Provider {
   id: string;
@@ -172,7 +178,12 @@ export type SSEEvent =
       after?: string;
       diff?: string;
     }
-  | { type: "run.output"; stream: "stdout" | "stderr"; chunk: string }
+  | {
+      type: "run.output";
+      stream: "stdout" | "stderr";
+      chunk: string;
+      call_id?: string;
+    }
   | { type: "plan.update"; plan: PlanState }
   | {
       type: "change_set.proposed";
@@ -189,6 +200,7 @@ export type SSEEvent =
       cwd: string;
       timeout_seconds: number;
       reason: string;
+      call_id?: string;
     }
   | {
       type: "context.compressed";

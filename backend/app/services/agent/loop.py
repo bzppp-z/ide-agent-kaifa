@@ -7,6 +7,8 @@
 ``RecentToolCallTracker`` 是软检测：连续 window 次相同工具 + 相同入参时注入提示消息。
 """
 
+import asyncio
+import contextlib
 import copy
 import difflib
 import hashlib
@@ -17,23 +19,31 @@ from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
+from app.core.config import Settings, get_settings
 from app.core.events import (
     BaseSSEEvent,
     ChangeSetProposedEvent,
+    CommandProposedEvent,
     DoneEvent,
     FileChangedEvent,
     MessageDeltaEvent,
     PatchProposedEvent,
     PlanUpdateEvent,
+    RunOutputEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from app.services.agent.context import truncate_messages
 from app.services.agent.mock_provider import MockProvider
-from app.services.agent.pending import PendingChangeSetRegistry, PendingPatchRegistry
+from app.services.agent.pending import (
+    PendingChangeSetRegistry,
+    PendingCommandRegistry,
+    PendingPatchRegistry,
+)
 from app.services.agent.plan import PlanState, apply_update, plan_from_json
 from app.services.agent.provider import LLMProvider, ToolCallChunk
 from app.services.agent.tools import EDIT_TOOL_NAMES, ToolRegistry, ToolResult
+from app.services.commands import truncate_output
 from app.services.permissions import normalize_permission_mode
 from app.services.repo_index import RepoIndex
 from app.services.sandbox import SandboxService
@@ -44,6 +54,7 @@ PATCH_APPROVAL_TIMEOUT_SECONDS = 120.0
 
 REJECTED_PATCH_SUMMARY = "user rejected the patch"
 REJECTED_CHANGE_SET_SUMMARY = "user rejected the change set"
+REJECTED_COMMAND_SUMMARY = "user rejected the command"
 
 
 class RecentToolCallTracker:
@@ -122,6 +133,13 @@ class AgentLoop:
 - write_patch 仅用于单个文件的精确替换；多文件任务不要拆成多次 write_patch
 - 删除操作永远需要用户确认；不要重复提交被拒绝的变更
 - 使用中文回复用户
+
+验证规则：
+- 编辑类任务完成后，优先运行项目里已有的验证入口：package.json 里的 npm run build / npm test、pytest、python -m compileall 等；项目里没有验证入口时，运行用户指定的命令
+- 调用 run_command 时用 reason 说明这次验证要确认什么
+- 命令失败时先读输出里的报错，修改文件后重跑；最多自动修复 2 轮，之后停止重试并向用户说明失败原因、已尝试的修复和建议的下一步
+- 只读命令（ls / dir / pwd / git status / git diff / cat / type / head / tail）可直接执行，其余命令需要用户审批；被拒绝的命令绝不重复提交
+- 不要运行会安装依赖、修改系统配置或需要交互输入的命令
 """
 
     def __init__(
@@ -132,6 +150,8 @@ class AgentLoop:
         history: list[dict] | None = None,
         pending_patches: PendingPatchRegistry | None = None,
         pending_change_sets: PendingChangeSetRegistry | None = None,
+        pending_commands: PendingCommandRegistry | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.provider = provider
         self.tools = tools
@@ -139,6 +159,8 @@ class AgentLoop:
         self.history = history or []
         self.pending_patches = pending_patches
         self.pending_change_sets = pending_change_sets
+        self.pending_commands = pending_commands
+        self.settings = settings or get_settings()
 
     async def run_stream(
         self,
@@ -181,6 +203,12 @@ class AgentLoop:
         )
         steps = 0
         tokens_used = 0
+        max_commands = self.settings.max_commands_per_run
+        max_fix_rounds = self.settings.max_auto_fix_rounds
+        commands_executed = 0
+        fix_rounds = 0
+        fix_limit_reached = False
+        rejected_commands: set[str] = set()
 
         while steps < max_steps and tokens_used < max_tokens:
             messages = truncate_messages(messages, max_tokens)
@@ -289,6 +317,145 @@ class AgentLoop:
                             )
                     else:
                         result = preview
+                elif tool_name == "run_command":
+                    prepared_result = await tools.call(
+                        "run_command",
+                        arguments,
+                        sandbox,
+                        session_workspace_path,
+                        permission_mode=permission_mode,
+                        repo_index=repo_index,
+                    )
+                    extra = prepared_result.extra or {}
+                    command = str(extra.get("command") or "")
+                    timeout_seconds = float(
+                        extra.get("timeout") or self.settings.command_timeout_default
+                    )
+                    reason = str(extra.get("reason") or "")
+
+                    if not prepared_result.ok:
+                        result = prepared_result
+                    elif fix_limit_reached:
+                        result = ToolResult(
+                            ok=False,
+                            summary="自动修复已达上限，本次 run 不再执行命令",
+                            details="请向用户说明失败原因、已尝试的修复与建议的下一步。",
+                        )
+                    elif command in rejected_commands:
+                        result = ToolResult(
+                            ok=False,
+                            summary="该命令已被拒绝，不要重复提交",
+                            details="请换一种方式验证，或先向用户说明必要性。",
+                        )
+                    else:
+                        accepted = True
+                        if extra.get("needs_approval") and self.pending_commands is not None:
+                            command_id = str(uuid4())
+                            self.pending_commands.register(
+                                command_id,
+                                session_id=session_id,
+                                command=command,
+                                cwd=session_workspace_path,
+                                timeout=timeout_seconds,
+                                reason=reason,
+                            )
+                            yield CommandProposedEvent(
+                                command_id=command_id,
+                                command=command,
+                                cwd=session_workspace_path,
+                                timeout_seconds=int(timeout_seconds),
+                                reason=reason,
+                                call_id=call_id,
+                            )
+                            try:
+                                accepted = await self.pending_commands.wait(
+                                    command_id, timeout=patch_approval_timeout
+                                )
+                            finally:
+                                self.pending_commands.discard(command_id)
+
+                            if not accepted:
+                                rejected_commands.add(command)
+
+                        if not accepted:
+                            result = ToolResult(
+                                ok=False,
+                                summary=REJECTED_COMMAND_SUMMARY,
+                                details="用户拒绝了该命令，请勿重复提交；如确有必要，先向用户说明原因。",
+                                extra={"command": command, "rejected": True},
+                            )
+                        elif commands_executed >= max_commands:
+                            result = ToolResult(
+                                ok=False,
+                                summary=f"本次 run 的命令数已达上限（{max_commands}）",
+                                details="请先总结当前进展，等待用户确认后再继续。",
+                                extra={"command": command, "limit_reached": True},
+                            )
+                            messages.append(
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        f"本次 run 的命令执行次数已达上限（{max_commands}），"
+                                        "请停止执行新命令，向用户总结当前进展。"
+                                    ),
+                                }
+                            )
+                        else:
+                            chunks: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+
+                            async def _on_output(stream_name: str, chunk: str) -> None:
+                                await chunks.put((stream_name, chunk))
+
+                            exec_started = time.perf_counter()
+                            exec_task = asyncio.create_task(
+                                sandbox.exec_stream(
+                                    session_workspace_path,
+                                    command,
+                                    timeout_seconds,
+                                    on_output=_on_output,
+                                )
+                            )
+                            try:
+                                while True:
+                                    try:
+                                        _stream, chunk = await asyncio.wait_for(
+                                            chunks.get(), 0.05
+                                        )
+                                    except asyncio.TimeoutError:
+                                        if exec_task.done():
+                                            break
+                                        continue
+                                    yield RunOutputEvent(
+                                        stream="stdout", chunk=chunk, call_id=call_id
+                                    )
+                                exit_code, output = await exec_task
+                            except asyncio.CancelledError:
+                                exec_task.cancel()
+                                with contextlib.suppress(asyncio.CancelledError, Exception):
+                                    await exec_task
+                                raise
+
+                            commands_executed += 1
+                            duration_ms = int((time.perf_counter() - exec_started) * 1000)
+                            timed_out = exit_code == 124
+                            details, truncated = truncate_output(output)
+                            result = ToolResult(
+                                ok=exit_code == 0,
+                                summary=(
+                                    f"命令执行{'超时' if timed_out else '完成'}："
+                                    f"exit_code={exit_code}"
+                                ),
+                                details=details or None,
+                                duration_ms=duration_ms,
+                                extra={
+                                    "command": command,
+                                    "reason": reason,
+                                    "exit_code": exit_code,
+                                    "timed_out": timed_out,
+                                    "truncated": truncated,
+                                    "duration_ms": duration_ms,
+                                },
+                            )
                 elif tool_name in EDIT_TOOL_NAMES:
                     result_holder: list[ToolResult] = []
                     async for change_event in self._edit_tool_events(
@@ -335,6 +502,27 @@ class AgentLoop:
                 tool_content = result.summary
                 if result.details:
                     tool_content += "\n" + result.details
+
+                command_failed = (
+                    tool_name == "run_command"
+                    and isinstance(result.extra, dict)
+                    and "exit_code" in result.extra
+                )
+                fix_limit_hit = False
+                if command_failed:
+                    if result.ok:
+                        fix_rounds = 0
+                    else:
+                        fix_rounds += 1
+                        if fix_rounds <= max_fix_rounds:
+                            tool_content += (
+                                f"\n验证失败，请修复后重跑"
+                                f"（自动修复第 {fix_rounds}/{max_fix_rounds} 轮）。"
+                            )
+                        else:
+                            fix_limit_reached = True
+                            fix_limit_hit = True
+
                 messages.append(
                     {
                         "role": "tool",
@@ -342,6 +530,17 @@ class AgentLoop:
                         "content": tool_content,
                     }
                 )
+
+                if fix_limit_hit:
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                f"自动修复已达上限（{max_fix_rounds} 轮），停止自动重试。"
+                                "请用中文向用户说明：失败原因、已尝试的修复、建议的下一步。"
+                            ),
+                        }
+                    )
 
                 if tracker.is_stuck():
                     messages.append(

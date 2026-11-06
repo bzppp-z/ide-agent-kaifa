@@ -73,8 +73,24 @@ async def terminal_ws(
             if not text:
                 continue
             payload = text if text.endswith("\n") else text + "\n"
-            stdin.write(payload.encode("utf-8"))
-            await stdin.drain()
+
+            # agent 命令执行期间持有 workspace 命令锁：终端输入排队等待，避免互相干扰。
+            lock = state.sandbox.command_lock(container_id)
+            if lock.locked():
+                with contextlib.suppress(Exception):
+                    await websocket.send_text(
+                        "\r\n[DevFlow] agent 正在执行命令，你的输入将在其结束后发送\r\n"
+                    )
+            try:
+                await asyncio.wait_for(lock.acquire(), timeout=120)
+            except asyncio.TimeoutError:
+                await websocket.send_text("\r\n[DevFlow] 等待超时，输入已丢弃\r\n")
+                continue
+            try:
+                stdin.write(payload.encode("utf-8"))
+                await stdin.drain()
+            finally:
+                lock.release()
 
     stdout_task = asyncio.create_task(pump_stdout(), name="devflow-terminal-stdout")
     stdin_task = asyncio.create_task(pump_stdin(), name="devflow-terminal-stdin")

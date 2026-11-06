@@ -29,11 +29,13 @@ from app.api.sessions import (
     load_session_or_404,
 )
 from app.core.events import (
+    CommandProposedEvent,
     DoneEvent,
     ErrorEvent,
     MessageDeltaEvent,
     PatchProposedEvent,
     PlanUpdateEvent,
+    RunOutputEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
@@ -46,6 +48,7 @@ from app.schemas.agent import (
     AgentRunRequest,
     AgentRunResponse,
     ChangeSetDecisionRequest,
+    CommandDecisionRequest,
     PatchDecisionRequest,
 )
 from app.services.agent.loop import AgentLoop
@@ -189,6 +192,9 @@ async def stop_run(
     change_sets = getattr(request.app.state, "pending_change_sets", None)
     if change_sets is not None:
         change_sets.discard_all(session_id)
+    commands = getattr(request.app.state, "pending_commands", None)
+    if commands is not None:
+        commands.discard_all(session_id)
     state["task"] = None
 
     return {"ok": True, "stopped": True}
@@ -258,6 +264,31 @@ async def respond_change_set(
     return {"ok": True, "change_set_id": change_set_id, **result}
 
 
+@router.patch("/agent/command/{command_id}")
+async def respond_command(
+    command_id: str,
+    body: CommandDecisionRequest,
+    request: Request,
+    current_session: str = Depends(get_current_session),
+) -> dict:
+    """登记用户对命令的决议；未知 command_id 404，非本会话 403。"""
+    registry = request.app.state.pending_commands
+    pending = registry.get(command_id)
+    if pending is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="command not found or already resolved",
+        )
+    if pending.session_id != current_session:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="command does not belong to this session",
+        )
+
+    registry.resolve(command_id, body.accepted)
+    return {"ok": True, "command_id": command_id, "accepted": body.accepted}
+
+
 # ---------------------------------------------------------------- background loop
 
 
@@ -288,6 +319,8 @@ async def _drive_agent_loop(
             history=history,
             pending_patches=app.state.pending_patches,
             pending_change_sets=getattr(app.state, "pending_change_sets", None),
+            pending_commands=getattr(app.state, "pending_commands", None),
+            settings=getattr(app.state, "settings", None),
         )
         settings = app.state.settings
         async for event in loop.run_stream(
@@ -386,6 +419,10 @@ async def _persist_event(
     pending_calls: dict[str, dict],
 ) -> None:
     async with session_factory() as db:
+        # 命令输出逐行回传、命令提案是一次性交互卡片：都不落库，避免高频写库。
+        if isinstance(event, (RunOutputEvent, CommandProposedEvent)):
+            return
+
         if isinstance(event, ToolCallEvent):
             pending_calls[event.call_id] = {
                 "tool_name": event.tool_name,

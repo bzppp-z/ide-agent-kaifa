@@ -23,7 +23,11 @@ from app.api.terminal import router as terminal_router
 from app.core.config import Settings, get_settings
 from app.db import SessionLocal, engine, init_db
 from app.services.agent.mock_provider import MockProvider
-from app.services.agent.pending import PendingChangeSetRegistry, PendingPatchRegistry
+from app.services.agent.pending import (
+    PendingChangeSetRegistry,
+    PendingCommandRegistry,
+    PendingPatchRegistry,
+)
 from app.services.agent.provider import DeepSeekProvider
 from app.services.checkpoints import CheckpointService
 from app.services.repo_index import RepoIndex
@@ -78,6 +82,7 @@ async def lifespan(app: FastAPI):
     app.state.loop_states = {}
     app.state.pending_patches = PendingPatchRegistry()
     app.state.pending_change_sets = PendingChangeSetRegistry()
+    app.state.pending_commands = PendingCommandRegistry()
     app.state.checkpoints = checkpoints
 
     idle_task = asyncio.create_task(workspace.run_idle_reclaim_loop(), name="devflow-idle-reclaim")

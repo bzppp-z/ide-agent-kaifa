@@ -65,6 +65,7 @@ class RunOutputEvent(BaseSSEEvent):
     type: Literal["run.output"] = "run.output"
     stream: Literal["stdout", "stderr"] = "stdout"
     chunk: str
+    call_id: str = ""
 
 
 class ErrorEvent(BaseSSEEvent):
@@ -102,6 +103,7 @@ class CommandProposedEvent(BaseSSEEvent):
     cwd: str = ""
     timeout_seconds: int = 30
     reason: str = ""
+    call_id: str = ""
 
 
 class ContextCompressedEvent(BaseSSEEvent):

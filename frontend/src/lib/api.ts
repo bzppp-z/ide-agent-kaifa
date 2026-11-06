@@ -3,6 +3,7 @@ import { SseParser } from "./sseParser";
 import type {
   ChangeRecord,
   ChangeSetDecisionResult,
+  CommandDecisionResult,
   FileContent,
   FileWriteResult,
   LocalBrowseResponse,
@@ -252,6 +253,20 @@ export function respondChangeSet(
     {
       method: "PATCH",
       body: JSON.stringify({ decisions }),
+    },
+  );
+}
+
+/** 登记对命令的接受/拒绝决议。 */
+export function respondCommand(
+  commandId: string,
+  accepted: boolean,
+): Promise<CommandDecisionResult> {
+  return apiFetch<CommandDecisionResult>(
+    `/agent/command/${encodeURIComponent(commandId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ accepted }),
     },
   );
 }

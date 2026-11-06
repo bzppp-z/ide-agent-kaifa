@@ -101,7 +101,8 @@
 **File:** [phase-4-verification-loop.md](phase-4-verification-loop.md)
 **Goal:** agent 可发起受控命令、流式读取输出、失败后最多自动修复 2 轮；终端与命令互斥。
 **Tasks:** 3
-**Status:** Not Started
+**Status:** Done
+**Completion:** √
 
 ### Phase 5: 上下文管理
 **File:** [phase-5-context-management.md](phase-5-context-management.md)

@@ -21,7 +21,17 @@ from pydantic import BaseModel
 from app.core.config import get_settings
 from app.core.security import validate_workspace_path
 from app.services.checkpoints import CheckpointService
-from app.services.permissions import can_delete, can_write, normalize_permission_mode
+from app.services.commands import (
+    is_dangerous_command,
+    is_interactive_command,
+    is_readonly_command,
+)
+from app.services.permissions import (
+    can_delete,
+    can_run_command,
+    can_write,
+    normalize_permission_mode,
+)
 from app.services.repo_index import (
     MAX_SYMBOL_FILE_BYTES,
     SKIP_DIR_NAMES,
@@ -178,6 +188,22 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         ["path"],
     ),
     _function_schema(
+        "run_command",
+        (
+            "在 workspace 内执行一条 shell 命令（用于构建、测试等验证）。"
+            "只读命令可直接执行，其余命令需要用户审批。"
+        ),
+        {
+            "command": {"type": "string", "description": "要执行的完整命令"},
+            "reason": {"type": "string", "description": "为什么要执行这条命令（验证目的）"},
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "超时秒数，默认 30，上限 120",
+            },
+        },
+        ["command", "reason"],
+    ),
+    _function_schema(
         "apply_patch",
         (
             "一次批量修改 1–10 个文件。每项提供 path + search/replace（唯一匹配），"
@@ -288,6 +314,9 @@ class ToolRegistry:
                 permission_mode=permission_mode,
                 repo_index=repo_index,
             )
+        elif name == "run_command":
+            # 只做校验与超时归一化；真正执行由 AgentLoop 负责（需要审批与流式输出）。
+            result = self._run_command(args, permission_mode)
         else:
             result = ToolResult(ok=False, summary=f"unknown tool: {name}")
 
@@ -539,6 +568,51 @@ class ToolRegistry:
             summary=f"patched {relative}",
             details=f"replaced 1 occurrence in {relative}",
             extra={"path": relative, "before": before, "after": after, "applied": True},
+        )
+
+    # ------------------------------------------------------- command tools
+
+    def _run_command(self, args: dict[str, Any], permission_mode: str) -> ToolResult:
+        """命令执行前的校验：只读模式、危险命令、交互式命令一律拒绝。"""
+        command = _string_value(args, "command").strip()
+        if not command:
+            return ToolResult(ok=False, summary="command 不能为空")
+
+        if not can_run_command(permission_mode):
+            return ToolResult(
+                ok=False,
+                summary="只读模式不执行命令",
+                details=f"permission_mode={normalize_permission_mode(permission_mode)}；请只读取与规划。",
+            )
+        if is_dangerous_command(command):
+            return ToolResult(
+                ok=False,
+                summary="命令包含危险操作，已拒绝执行",
+                details=f"被拒绝的命令：{command}",
+            )
+        if is_interactive_command(command):
+            return ToolResult(
+                ok=False,
+                summary="该命令需要交互输入，agent 无法执行",
+                details="请改用非交互参数（例如 npm init -y、python script.py）。",
+            )
+
+        reason = _string_value(args, "reason").strip()
+        timeout = _int_arg(args, "timeout_seconds", _SETTINGS.command_timeout_default)
+        timeout = max(1, min(timeout, _SETTINGS.command_timeout_max))
+        readonly = is_readonly_command(command)
+
+        return ToolResult(
+            ok=True,
+            summary=("只读命令，可直接执行：" if readonly else "命令待审批：") + command,
+            details=f"reason: {reason or '(未填写)'}",
+            extra={
+                "command": command,
+                "reason": reason,
+                "timeout": timeout,
+                "needs_approval": not readonly,
+                "readonly": readonly,
+            },
         )
 
     # ------------------------------------------------- batch edit tools
